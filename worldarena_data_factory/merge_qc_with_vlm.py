@@ -49,17 +49,46 @@ def is_hard_fail(row: pd.Series) -> bool:
     return any(t in reason for t in hard_tokens)
 
 
+def vlm_obvious_visual_hard_reject(row: pd.Series) -> bool:
+    if str(row.get('vlm_decision', '')).upper() != 'REJECT':
+        return False
+    zero_score_keys = [
+        'score_robot_visibility', 'score_gripper_contact_visibility', 'score_object_visibility',
+        'score_physical_plausibility', 'score_temporal_consistency', 'score_visual_quality',
+        'score_task_relevance', 'score_sft_positive_suitability', 'score_a2v_positive_suitability',
+    ]
+    zero_count = 0
+    for key in zero_score_keys:
+        try:
+            zero_count += int(float(row.get(key, 1)) <= 0)
+        except Exception:
+            pass
+    evidence = str(row.get('vlm_evidence', '')).lower()
+    hard_phrases = [
+        'no robot', 'robot or gripper is visible', 'no gripper', 'no object',
+        'not visible in any frame', 'blank', 'gray', 'no manipulation',
+        'no visual content', 'missing robot', 'wrong_robot_or_missing_robot',
+    ]
+    hard_flags = any(str(row.get(k, '')).lower() == 'true' for k in [
+        'flag_wrong_robot_or_missing_robot', 'flag_critical_contact_invisible', 'flag_object_moves_without_contact',
+    ])
+    return zero_count >= 6 or hard_flags or any(x in evidence for x in hard_phrases)
+
+
 def decide(row: pd.Series) -> tuple[str, str, bool]:
     rule_status = str(row.get('qc_status', '')).lower()
     vlm = str(row.get('vlm_decision', 'NEED_HUMAN_REVIEW')).upper()
     conf = float(row.get('vlm_confidence') or 0.0)
     hard = is_hard_fail(row)
+    obvious_visual_hard = vlm_obvious_visual_hard_reject(row)
     strong_rule_reject = rule_status == 'reject'
     strong_vlm_reject = vlm == 'REJECT' and conf >= 0.75
     strong_vlm_pass = vlm == 'PASS' and conf >= 0.75
-    conflict = (strong_rule_reject and strong_vlm_pass) or (rule_status == 'pass' and strong_vlm_reject)
+    conflict = (strong_rule_reject and strong_vlm_pass) or (rule_status == 'pass' and strong_vlm_reject and not obvious_visual_hard)
     if hard:
         return 'REJECT', 'deterministic_hard_fail', conflict
+    if obvious_visual_hard:
+        return 'REJECT', 'vlm_obvious_visual_hard_reject', False
     if conflict:
         return 'NEED_HUMAN_REVIEW', 'rule_vlm_conflict', True
     if strong_vlm_reject:
