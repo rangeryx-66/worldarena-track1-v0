@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
@@ -23,7 +24,10 @@ QC_FIELDS = [
     "sharpness_laplacian", "arm_visible_ratio", "left_gripper_visible_ratio",
     "right_gripper_visible_ratio", "end_effector_visible_ratio",
     "contact_region_visible_ratio", "object_motion_without_visible_contact_score",
-    "bad_frame_ratio", "motion_score", "qc_status", "qc_reason",
+    "bad_frame_ratio", "motion_score",
+    "deterministic_hard_fail", "hard_fail_reason", "action_joint14_valid",
+    "action_has_nan", "action_has_inf", "heuristic_candidate_labels", "rule_qc_context",
+    "qc_status", "qc_reason",
 ]
 
 
@@ -58,6 +62,24 @@ def safe_float(x: Any, default: float = float("nan")) -> float:
     except Exception:
         pass
     return default
+
+
+def validate_action_joint14(row: dict[str, Any]) -> dict[str, Any]:
+    path = str(row.get("action_joint14_norm_path") or row.get("action_joint14_raw_path") or "")
+    out = {"action_joint14_valid": False, "action_has_nan": False, "action_has_inf": False, "action_reason": "action_missing"}
+    if not path or not Path(path).exists():
+        return out
+    try:
+        arr = np.load(path, mmap_mode="r")
+        shape = tuple(arr.shape)
+        out["action_has_nan"] = bool(np.isnan(arr).any())
+        out["action_has_inf"] = bool(np.isinf(arr).any())
+        valid = len(shape) == 2 and shape[1] == 14 and shape[0] >= 60 and not out["action_has_nan"] and not out["action_has_inf"]
+        out["action_joint14_valid"] = bool(valid)
+        out["action_reason"] = "ok" if valid else f"invalid_action_shape_or_values:{shape}"
+    except Exception as exc:
+        out["action_reason"] = f"action_load_error:{type(exc).__name__}"
+    return out
 
 
 def frame_foreground_metrics(frame_bgr: np.ndarray) -> dict[str, float]:
@@ -134,12 +156,20 @@ def analyze_video(args_tuple: tuple[int, dict[str, Any], int]) -> dict[str, Any]
         "qc_reason": "video_missing",
     }
 
+    action_qc = validate_action_joint14(row)
+    out.update({
+        "action_joint14_valid": action_qc["action_joint14_valid"],
+        "action_has_nan": action_qc["action_has_nan"],
+        "action_has_inf": action_qc["action_has_inf"],
+    })
+
     if not video_path or not Path(video_path).exists():
+        out.update({"deterministic_hard_fail": True, "hard_fail_reason": "video_missing;" + action_qc.get("action_reason", ""), "heuristic_candidate_labels": "", "rule_qc_context": "{}"})
         return out
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        out["qc_reason"] = "video_unreadable"
+        out.update({"qc_reason": "video_unreadable", "deterministic_hard_fail": True, "hard_fail_reason": "video_unreadable;" + action_qc.get("action_reason", ""), "heuristic_candidate_labels": "", "rule_qc_context": "{}"})
         return out
 
     fps = safe_float(cap.get(cv2.CAP_PROP_FPS), 0.0)
@@ -160,7 +190,7 @@ def analyze_video(args_tuple: tuple[int, dict[str, Any], int]) -> dict[str, Any]
     cap.release()
 
     if not frames:
-        out.update({"fps": fps, "width": width, "height": height, "frame_count": frame_count, "qc_reason": "no_decodable_sample_frames"})
+        out.update({"fps": fps, "width": width, "height": height, "frame_count": frame_count, "qc_reason": "no_decodable_sample_frames", "deterministic_hard_fail": True, "hard_fail_reason": "no_decodable_sample_frames;" + action_qc.get("action_reason", ""), "heuristic_candidate_labels": "", "rule_qc_context": "{}"})
         return out
 
     brightness = []
@@ -218,47 +248,69 @@ def analyze_video(args_tuple: tuple[int, dict[str, Any], int]) -> dict[str, Any]
     motion_score = float(np.mean(motion_scores)) if motion_scores else 0.0
     obj_motion_no_contact = float(np.mean(invisible_motion)) if invisible_motion else 0.0
 
-    reasons: list[str] = []
-    warns: list[str] = []
+    hard_reasons: list[str] = []
+    heuristic_labels: list[str] = []
 
     if read_fail > max(1, len(indices) // 4):
-        reasons.append("many_sample_frames_failed")
+        hard_reasons.append("many_sample_frames_failed")
     if bad_frame_ratio > 0.20:
-        reasons.append("black_or_bad_frames")
-    if color_shift > 70 and np.std(brightness) > 18:
-        reasons.append("strong_color_or_exposure_jump")
-    elif color_shift > 40:
-        warns.append("color_shift")
-    if temporal_flicker > 55:
-        reasons.append("strong_temporal_flicker")
-    elif temporal_flicker > 30:
-        warns.append("temporal_flicker")
-    if float(np.mean(blockiness)) > 32 and float(np.mean(sharpness)) < 45:
-        reasons.append("severe_compression_artifacts")
-    elif float(np.mean(blockiness)) > 18:
-        warns.append("compression_artifacts")
-    if obj_motion_no_contact > 0.55 and motion_score > 10 and contact_ratio < 0.25:
-        reasons.append("object_motion_without_visible_contact")
-    elif obj_motion_no_contact > 0.30 and motion_score > 8:
-        warns.append("possible_motion_without_contact")
-    if arm_visible_ratio < 0.10 and motion_score > 8:
-        warns.append("arm_visibility_low")
-    if ee_ratio < 0.10 and motion_score > 8:
-        warns.append("end_effector_visibility_low")
-    if fps and abs(fps - 24.0) > 2.5:
-        warns.append("fps_not_24")
+        hard_reasons.append("black_or_bad_frames")
     if width and height and (width, height) != (640, 480):
-        warns.append("resolution_not_640x480")
+        hard_reasons.append("resolution_invalid")
+    if fps and abs(fps - 24.0) > 2.5:
+        hard_reasons.append("fps_invalid")
+    if not action_qc["action_joint14_valid"]:
+        hard_reasons.append(action_qc.get("action_reason", "action_invalid"))
+    if action_qc["action_has_nan"]:
+        hard_reasons.append("action_nan")
+    if action_qc["action_has_inf"]:
+        hard_reasons.append("action_inf")
 
-    if reasons:
+    if color_shift > 70 and np.std(brightness) > 18:
+        heuristic_labels.append("strong_color_or_exposure_jump")
+    elif color_shift > 40:
+        heuristic_labels.append("color_shift")
+    if temporal_flicker > 55:
+        heuristic_labels.append("strong_temporal_flicker")
+    elif temporal_flicker > 30:
+        heuristic_labels.append("temporal_flicker")
+    if float(np.mean(blockiness)) > 32 and float(np.mean(sharpness)) < 45:
+        heuristic_labels.append("severe_compression_artifacts")
+    elif float(np.mean(blockiness)) > 18:
+        heuristic_labels.append("compression_artifacts")
+    if obj_motion_no_contact > 0.55 and motion_score > 10 and contact_ratio < 0.25:
+        heuristic_labels.append("object_motion_without_visible_contact")
+    elif obj_motion_no_contact > 0.30 and motion_score > 8:
+        heuristic_labels.append("possible_motion_without_contact")
+    if arm_visible_ratio < 0.10 and motion_score > 8:
+        heuristic_labels.append("arm_visibility_low")
+    if ee_ratio < 0.10 and motion_score > 8:
+        heuristic_labels.append("end_effector_visibility_low")
+
+    deterministic_hard_fail = bool(hard_reasons)
+    if deterministic_hard_fail:
         status = "reject"
-        reason = ";".join(reasons)
-    elif warns:
+        reason = ";".join(hard_reasons)
+    elif heuristic_labels:
         status = "warn"
-        reason = ";".join(warns)
+        reason = ";".join(heuristic_labels)
     else:
         status = "pass"
         reason = "ok"
+    rule_context = {
+        "brightness_mean": float(np.mean(brightness)),
+        "brightness_temporal_std": float(np.std(brightness)),
+        "contrast_mean": float(np.mean(contrast)),
+        "color_shift_score": color_shift,
+        "temporal_flicker_score": temporal_flicker,
+        "compression_artifact_score": float(np.mean(blockiness)),
+        "sharpness_laplacian": float(np.mean(sharpness)),
+        "arm_visible_ratio": arm_visible_ratio,
+        "end_effector_visible_ratio": ee_ratio,
+        "contact_region_visible_ratio": contact_ratio,
+        "object_motion_without_visible_contact_score": obj_motion_no_contact,
+        "motion_score": motion_score,
+    }
 
     out.update({
         "video_readable": True,
@@ -281,6 +333,13 @@ def analyze_video(args_tuple: tuple[int, dict[str, Any], int]) -> dict[str, Any]
         "object_motion_without_visible_contact_score": obj_motion_no_contact,
         "bad_frame_ratio": bad_frame_ratio,
         "motion_score": motion_score,
+        "deterministic_hard_fail": deterministic_hard_fail,
+        "hard_fail_reason": ";".join(hard_reasons),
+        "action_joint14_valid": action_qc["action_joint14_valid"],
+        "action_has_nan": action_qc["action_has_nan"],
+        "action_has_inf": action_qc["action_has_inf"],
+        "heuristic_candidate_labels": ";".join(heuristic_labels),
+        "rule_qc_context": json.dumps(rule_context, ensure_ascii=False),
         "qc_status": status,
         "qc_reason": reason,
     })
@@ -376,7 +435,7 @@ def write_report(out_dir: Path, manifest_path: Path, full: pd.DataFrame, qc: pd.
     lines.append("")
     lines.append("- White backgrounds, partially out-of-frame robot arms, and light render grain are treated as target-domain style and are not reject reasons by themselves.")
     lines.append("- Arm/gripper/contact visibility uses image-processing proxies, not a learned detector. Warn/reject samples should be manually spot-checked with the contact sheets.")
-    lines.append("- Reject is reserved for unreadable videos, bad/black frames, strong exposure/color jumps, strong flicker, severe compression artifacts, or object motion without visible contact.")
+    lines.append("- Reject is reserved for deterministic hard failures: unreadable videos, bad/black frames, invalid fps/resolution, invalid joint14 action shape, or NaN/Inf action. Visual heuristic issues are warning/context labels for VLM review.")
     (out_dir / "qc_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
