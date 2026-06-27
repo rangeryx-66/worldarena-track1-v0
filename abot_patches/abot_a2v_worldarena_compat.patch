@@ -1,0 +1,204 @@
+diff --git a/inference/diffsynth/models/wan_video_vace.py b/inference/diffsynth/models/wan_video_vace.py
+index 5a8f61a..961e42e 100755
+--- a/inference/diffsynth/models/wan_video_vace.py
++++ b/inference/diffsynth/models/wan_video_vace.py
+@@ -57,10 +57,22 @@ class VaceWanModel(torch.nn.Module):
+     ):
+         c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
+         c = [u.flatten(2).transpose(1, 2) for u in c]
+-        c = torch.cat([
+-            torch.cat([u, u.new_zeros(1, x.shape[1] - u.size(1), u.size(2))],
+-                      dim=1) for u in c
+-        ])
++        aligned = []
++        for u in c:
++            if u.size(1) > x.shape[1]:
++                import os
++                if os.environ.get("ABOT_ALLOW_VACE_TOKEN_TRUNCATE", "0") != "1":
++                    raise RuntimeError(
++                        "VACE context has more tokens than DiT latents "
++                        f"({u.size(1)} > {x.shape[1]}). Refuse to truncate by default; "
++                        "fix the A2V condition/video geometry or set "
++                        "ABOT_ALLOW_VACE_TOKEN_TRUNCATE=1 only for smoke tests."
++                    )
++                u = u[:, :x.shape[1], :]
++            elif u.size(1) < x.shape[1]:
++                u = torch.cat([u, u.new_zeros(1, x.shape[1] - u.size(1), u.size(2))], dim=1)
++            aligned.append(u)
++        c = torch.cat(aligned)
+         
+         def create_custom_forward(module):
+             def custom_forward(*inputs):
+diff --git a/inference/diffsynth/pipelines/wan_video_new.py b/inference/diffsynth/pipelines/wan_video_new.py
+index 12595f9..bd64ec4 100755
+--- a/inference/diffsynth/pipelines/wan_video_new.py
++++ b/inference/diffsynth/pipelines/wan_video_new.py
+@@ -447,14 +447,17 @@ class WanVideoPipeline(BasePipeline):
+         else:
+             step = max(1, num_layers // 8)
+             vace_layers = tuple(range(0, num_layers, step))
++        first_block = dit.blocks[0] if hasattr(dit, "blocks") and len(dit.blocks) > 0 else None
++        num_heads = getattr(dit, "num_heads", getattr(first_block, "num_heads", 40))
++        ffn_dim = getattr(dit, "ffn_dim", getattr(first_block, "ffn_dim", 13824))
+         vace = VaceWanModel(
+             vace_layers=vace_layers,
+             vace_in_dim=vace_in_dim,
+             patch_size=tuple(dit.patch_size) if hasattr(dit, "patch_size") else (1, 2, 2),
+             has_image_input=getattr(dit, "has_image_input", False),
+             dim=dit.dim,
+-            num_heads=dit.num_heads,
+-            ffn_dim=dit.ffn_dim,
++            num_heads=num_heads,
++            ffn_dim=ffn_dim,
+             eps=getattr(dit, "eps", 1e-6),
+         )
+         vace.init_from_dit(dit, zero_init_extra=zero_init_extra)
+diff --git a/inference/diffsynth/pipelines/wan_video_new_vace.py b/inference/diffsynth/pipelines/wan_video_new_vace.py
+index 3138e4e..fc49ecf 100755
+--- a/inference/diffsynth/pipelines/wan_video_new_vace.py
++++ b/inference/diffsynth/pipelines/wan_video_new_vace.py
+@@ -448,14 +448,17 @@ class WanVideoPipeline(BasePipeline):
+         else:
+             step = max(1, num_layers // 8)
+             vace_layers = tuple(range(0, num_layers, step))
++        first_block = dit.blocks[0] if hasattr(dit, "blocks") and len(dit.blocks) > 0 else None
++        num_heads = getattr(dit, "num_heads", getattr(first_block, "num_heads", 40))
++        ffn_dim = getattr(dit, "ffn_dim", getattr(first_block, "ffn_dim", 13824))
+         vace = VaceWanModel(
+             vace_layers=vace_layers,
+             vace_in_dim=vace_in_dim,
+             patch_size=tuple(dit.patch_size) if hasattr(dit, "patch_size") else (1, 2, 2),
+             has_image_input=getattr(dit, "has_image_input", False),
+             dim=dit.dim,
+-            num_heads=dit.num_heads,
+-            ffn_dim=dit.ffn_dim,
++            num_heads=num_heads,
++            ffn_dim=ffn_dim,
+             eps=getattr(dit, "eps", 1e-6),
+         )
+         vace.init_from_dit(dit, zero_init_extra=zero_init_extra)
+diff --git a/inference/diffsynth/trainers/unified_dataset.py b/inference/diffsynth/trainers/unified_dataset.py
+index 00c7eb4..2ee746f 100755
+--- a/inference/diffsynth/trainers/unified_dataset.py
++++ b/inference/diffsynth/trainers/unified_dataset.py
+@@ -108,6 +108,15 @@ class ImageCropAndResize(DataProcessingOperator):
+ 
+ 
+ 
++class ImageStretchResize(ImageCropAndResize):
++    def crop_and_resize(self, image, target_height, target_width):
++        return torchvision.transforms.functional.resize(
++            image,
++            (target_height, target_width),
++            interpolation=torchvision.transforms.InterpolationMode.BILINEAR,
++        )
++
++
+ class ToList(DataProcessingOperator):
+     def __call__(self, data):
+         return [data]
+@@ -356,17 +365,19 @@ class UnifiedDataset(torch.utils.data.Dataset):
+         height_division_factor=16, width_division_factor=16,
+         num_frames=81, time_division_factor=4, time_division_remainder=1,
+         uniform_sampling=True,
++        resize_mode="crop",
+     ):
++        frame_processor_cls = ImageStretchResize if resize_mode == "stretch" else ImageCropAndResize
+         return RouteByType(operator_map=[
+             (str, ToAbsolutePath(base_path) >> RouteByExtensionName(operator_map=[
+-                (("jpg", "jpeg", "png", "webp"), LoadImage() >> ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor) >> ToList()),
++                (("jpg", "jpeg", "png", "webp"), LoadImage() >> frame_processor_cls(height, width, max_pixels, height_division_factor, width_division_factor) >> ToList()),
+                 (("gif",), LoadGIF(
+                     num_frames, time_division_factor, time_division_remainder,
+-                    frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
++                    frame_processor=frame_processor_cls(height, width, max_pixels, height_division_factor, width_division_factor),
+                 )),
+                 (("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm"), LoadVideo(
+                     num_frames, time_division_factor, time_division_remainder,
+-                    frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
++                    frame_processor=frame_processor_cls(height, width, max_pixels, height_division_factor, width_division_factor),
+                     uniform_sampling=uniform_sampling,
+                 )),
+             ])),
+diff --git a/inference/diffsynth/utils/action_utils.py b/inference/diffsynth/utils/action_utils.py
+index ef590a4..50da4b1 100755
+--- a/inference/diffsynth/utils/action_utils.py
++++ b/inference/diffsynth/utils/action_utils.py
+@@ -793,4 +793,43 @@ def load_camera_params_from_npy(
+         intrinsic[0, 2] = intrinsic[0, 2] * scale - crop_left  # cx (ppx)
+         intrinsic[1, 2] = intrinsic[1, 2] * scale - crop_top   # cy (ppy)
+     
+-    return intrinsic, extrinsics
+\ No newline at end of file
++    return intrinsic, extrinsics
++# Compatibility helper for training/train_a2v.py in this checkout.
++def get_vace_traj_maps_with_scaled_intrinsic(
++    pose,
++    w2c,
++    c2w,
++    intrinsic,
++    original_size,
++    target_size,
++    radius_gen_func=None,
++):
++    """Generate VACE trajectory maps after scaling camera intrinsics for stretch resize.
++
++    Args:
++        original_size: (height, width) of the source video.
++        target_size: (height, width) used by the training video tensor.
++    """
++    if isinstance(original_size, torch.Tensor):
++        original_size = original_size.detach().cpu().tolist()
++    if isinstance(target_size, torch.Tensor):
++        target_size = target_size.detach().cpu().tolist()
++    orig_h, orig_w = int(original_size[0]), int(original_size[1])
++    tgt_h, tgt_w = int(target_size[0]), int(target_size[1])
++    intr = intrinsic.clone()
++    intr[..., 0, :] = intr[..., 0, :] * (float(tgt_w) / max(float(orig_w), 1.0))
++    intr[..., 1, :] = intr[..., 1, :] * (float(tgt_h) / max(float(orig_h), 1.0))
++    return get_traj_maps(pose, w2c, c2w, intr, (tgt_h, tgt_w), radius_gen_func=radius_gen_func)
++
++# Compatibility helper for stretch resizing camera intrinsics.
++def adjust_intrinsic_for_resize_stretch(intrinsic, original_size, target_size):
++    if isinstance(original_size, torch.Tensor):
++        original_size = original_size.detach().cpu().tolist()
++    if isinstance(target_size, torch.Tensor):
++        target_size = target_size.detach().cpu().tolist()
++    orig_h, orig_w = int(original_size[0]), int(original_size[1])
++    tgt_h, tgt_w = int(target_size[0]), int(target_size[1])
++    intr = intrinsic.clone()
++    intr[..., 0, :] = intr[..., 0, :] * (float(tgt_w) / max(float(orig_w), 1.0))
++    intr[..., 1, :] = intr[..., 1, :] * (float(tgt_h) / max(float(orig_h), 1.0))
++    return intr
+diff --git a/training/train_a2v.py b/training/train_a2v.py
+index 2e65863..d79baf9 100644
+--- a/training/train_a2v.py
++++ b/training/train_a2v.py
+@@ -213,12 +213,21 @@ class WanActionVaceTrainingModule(DiffusionTrainingModule):
+         if (self.action_condition_enabled and self.init_vace_from_dit
+                 and self.pipe.dit is not None and self.pipe.vace is None):
+             vace_in_dim = self.init_vace_from_dit_vace_in_dim
+-            self.pipe.vace = WanVideoPipeline.create_vace_from_dit(
+-                self.pipe.dit,
+-                vace_in_dim=vace_in_dim,
+-                zero_init_extra=True,
+-                vace_layers_step=self.vace_layers_step,
+-            )
++            try:
++                self.pipe.vace = WanVideoPipeline.create_vace_from_dit(
++                    self.pipe.dit,
++                    vace_in_dim=vace_in_dim,
++                    zero_init_extra=True,
++                    vace_layers_step=self.vace_layers_step,
++                )
++            except TypeError as exc:
++                if "vace_layers_step" not in str(exc):
++                    raise
++                self.pipe.vace = WanVideoPipeline.create_vace_from_dit(
++                    self.pipe.dit,
++                    vace_in_dim=vace_in_dim,
++                    zero_init_extra=True,
++                )
+             self.pipe.vace = self.pipe.vace.to(
+                 dtype=torch.bfloat16,
+                 device=next(self.pipe.dit.parameters()).device,
