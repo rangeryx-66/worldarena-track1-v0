@@ -276,7 +276,7 @@ def parse_labels(value: Any) -> list[str]:
     return [x for x in text.replace(';', ',').split(',') if x.strip()]
 
 
-def build_prompt(row: pd.Series, rule: dict[str, Any], cfg: dict[str, Any]) -> str:
+def build_prompt(row: pd.Series, rule: dict[str, Any], cfg: dict[str, Any], include_rule_heuristics: bool = False) -> str:
     task_family = str(row.get('task_family') or 'unknown')
     task_specific = cfg.get('task_specific_checklists', {}).get(task_family, [])
     parts = [
@@ -295,14 +295,23 @@ def build_prompt(row: pd.Series, rule: dict[str, Any], cfg: dict[str, Any]) -> s
         f"task_family: {task_family}",
         f"robotwin_task_name: {row.get('robotwin_task_name', '')}",
         f"prompt_worldarena_style: {row.get('prompt_worldarena_style', '')}",
-        f"rule_qc_status: {rule.get('qc_status', '')}",
-        f"rule_qc_reason: {rule.get('qc_reason', '')}",
         f"deterministic_hard_fail: {rule.get('deterministic_hard_fail', False)}",
         f"hard_fail_reason: {rule.get('hard_fail_reason', '')}",
-        f"heuristic_candidate_labels: {parse_labels(rule.get('heuristic_candidate_labels', ''))}",
-        f"rule_qc_context: {rule.get('rule_qc_context', '')}",
-        'Important: output JSON only. No markdown, no code fence, no prose outside JSON.',
     ]
+    if include_rule_heuristics:
+        parts.extend([
+            'Optional rule-QC soft heuristics. Treat these as non-authoritative triage hints only; judge the images directly.',
+            f"rule_qc_status: {rule.get('qc_status', '')}",
+            f"rule_qc_reason: {rule.get('qc_reason', '')}",
+            f"heuristic_candidate_labels: {parse_labels(rule.get('heuristic_candidate_labels', ''))}",
+            f"rule_qc_context: {rule.get('rule_qc_context', '')}",
+        ])
+    else:
+        parts.append(
+            'Do not infer quality from hidden rule-QC scores. Judge the contact sheets directly. '
+            'White background, mild simulator render grain, and partially out-of-frame arms are normal WorldArena style and are not rejection reasons by themselves.'
+        )
+    parts.append('Important: output JSON only. No markdown, no code fence, no prose outside JSON.')
     return '\n\n'.join(str(x) for x in parts if str(x).strip())
 
 
@@ -404,6 +413,7 @@ def main() -> None:
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--max-samples', type=int)
     ap.add_argument('--prompt-config', default=str(Path(__file__).resolve().parent / 'configs' / 'vlm_qc_prompt.yaml'))
+    ap.add_argument('--include-rule-heuristics', action='store_true', help='Include non-authoritative soft rule QC metrics in the VLM prompt. Default is blind visual review.')
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -434,7 +444,7 @@ def main() -> None:
             continue
         image_paths = make_vlm_inputs(row, out, args.num_frames)
         rule = rule_by_episode.get(episode_id, {})
-        prompt = build_prompt(row, rule, cfg)
+        prompt = build_prompt(row, rule, cfg, include_rule_heuristics=args.include_rule_heuristics)
         raw_path = out / 'raw_vlm_outputs' / f'{episode_id}.txt'
         if raw_path.exists() and not args.resume:
             raw_path.unlink()
