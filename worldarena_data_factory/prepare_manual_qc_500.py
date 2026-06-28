@@ -259,6 +259,52 @@ def write_errors(path: Path, rows: list[dict[str,Any]]):
         w.writerows(rows)
 
 
+ANNOTATION_FIELDS = ['human_label','human_reason','human_confidence','notes','annotated_at','annotator']
+
+
+def preserve_existing_annotations(new_df: pd.DataFrame, out_dir: Path, csv_path: Path) -> pd.DataFrame:
+    candidates = [out_dir/'manual_qc_500_labeled.csv', csv_path]
+    old_df = pd.DataFrame()
+    for path in candidates:
+        if path.exists():
+            try:
+                old_df = pd.read_csv(path).fillna('')
+                if not old_df.empty:
+                    break
+            except Exception:
+                pass
+    if old_df.empty:
+        return new_df
+    for c in ANNOTATION_FIELDS:
+        if c not in new_df.columns:
+            new_df[c] = ''
+        if c not in old_df.columns:
+            old_df[c] = ''
+
+    keyed = {}
+    if {'sample_id', 'episode_id'}.issubset(old_df.columns):
+        for _, r in old_df.iterrows():
+            if safe_str(r.get('human_label')):
+                keyed[(safe_str(r.get('sample_id')), safe_str(r.get('episode_id')))] = r
+    by_episode = {}
+    if 'episode_id' in old_df.columns:
+        for _, r in old_df.iterrows():
+            if safe_str(r.get('human_label')):
+                by_episode[safe_str(r.get('episode_id'))] = r
+
+    copied = 0
+    for idx, r in new_df.iterrows():
+        old = keyed.get((safe_str(r.get('sample_id')), safe_str(r.get('episode_id')))) or by_episode.get(safe_str(r.get('episode_id')))
+        if old is None:
+            continue
+        for c in ANNOTATION_FIELDS:
+            new_df.at[idx, c] = old.get(c, '')
+        copied += 1
+    if copied:
+        print(f'preserved {copied} existing manual labels', flush=True)
+    return new_df
+
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--manifest', required=True, type=Path)
@@ -326,7 +372,9 @@ def main():
         done=i+1
         if done == 1 or done == total or (args.progress_every > 0 and done % args.progress_every == 0):
             print(f'prepared {done}/{total} samples; rows={len(rows)} errors={len(errors)}', flush=True)
-    pd.DataFrame(rows, columns=FIELDS).to_csv(csv_path, index=False)
+    result = pd.DataFrame(rows, columns=FIELDS)
+    result = preserve_existing_annotations(result, out, csv_path)
+    result.to_csv(csv_path, index=False)
     write_errors(out/'errors.csv', errors)
     print(f'wrote {len(rows)} rows to {csv_path}; errors={len(errors)}')
 

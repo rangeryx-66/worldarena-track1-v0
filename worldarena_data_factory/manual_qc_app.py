@@ -46,12 +46,58 @@ def parse_args():
     return ap.parse_args()
 
 
-def load_data(base: Path, out: Path) -> pd.DataFrame:
-    path = out if out.exists() else base
-    df = pd.read_csv(path).fillna('')
-    for c in ['human_label','human_reason','human_confidence','notes','annotated_at','annotator']:
-        if c not in df.columns: df[c]=''
+ANNOTATION_COLUMNS = ['human_label','human_reason','human_confidence','notes','annotated_at','annotator']
+
+
+def ensure_annotation_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ANNOTATION_COLUMNS:
+        if c not in df.columns:
+            df[c] = ''
     return df
+
+
+def merge_existing_annotations(base_df: pd.DataFrame, labeled_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = ensure_annotation_columns(base_df.copy()).fillna('')
+    labeled_df = ensure_annotation_columns(labeled_df.copy()).fillna('')
+    if labeled_df.empty:
+        return base_df
+
+    keyed = {}
+    if {'sample_id', 'episode_id'}.issubset(labeled_df.columns):
+        for _, r in labeled_df.iterrows():
+            key = (str(r.get('sample_id', '')), str(r.get('episode_id', '')))
+            if str(r.get('human_label', '')):
+                keyed[key] = r
+    by_episode = {}
+    if 'episode_id' in labeled_df.columns:
+        for _, r in labeled_df.iterrows():
+            eid = str(r.get('episode_id', ''))
+            if str(r.get('human_label', '')):
+                by_episode[eid] = r
+
+    for idx, r in base_df.iterrows():
+        key = (str(r.get('sample_id', '')), str(r.get('episode_id', '')))
+        old = keyed.get(key) or by_episode.get(str(r.get('episode_id', '')))
+        if old is None:
+            continue
+        for c in ANNOTATION_COLUMNS:
+            base_df.at[idx, c] = old.get(c, '')
+    return base_df
+
+
+def load_data(base: Path, out: Path) -> pd.DataFrame:
+    base_df = pd.read_csv(base).fillna('') if base.exists() else pd.DataFrame()
+    if not out.exists():
+        return ensure_annotation_columns(base_df)
+    labeled_df = pd.read_csv(out).fillna('')
+    if base_df.empty:
+        return ensure_annotation_columns(labeled_df)
+    if len(base_df) != len(labeled_df):
+        return merge_existing_annotations(base_df, labeled_df)
+    if 'episode_id' in base_df.columns and 'episode_id' in labeled_df.columns:
+        if base_df['episode_id'].astype(str).tolist() != labeled_df['episode_id'].astype(str).tolist():
+            return merge_existing_annotations(base_df, labeled_df)
+    return ensure_annotation_columns(labeled_df)
 
 
 def save_data(df: pd.DataFrame, base: Path, out: Path):
