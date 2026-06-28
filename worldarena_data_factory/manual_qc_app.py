@@ -162,11 +162,26 @@ def main():
 ''',
         unsafe_allow_html=True,
     )
-    if 'df' not in st.session_state or st.session_state.get('csv_path') != str(args.csv) or st.session_state.get('out_path') != str(args.out):
+    csv_mtime = args.csv.stat().st_mtime if args.csv.exists() else 0
+    out_mtime = args.out.stat().st_mtime if args.out.exists() else 0
+    should_reload = (
+        'df' not in st.session_state
+        or st.session_state.get('csv_path') != str(args.csv)
+        or st.session_state.get('out_path') != str(args.out)
+        or st.session_state.get('csv_mtime') != csv_mtime
+        or st.session_state.get('out_mtime') != out_mtime
+    )
+    if should_reload:
+        old_idx = int(st.session_state.get('idx', 0))
         st.session_state.df = load_data(args.csv, args.out)
         st.session_state.csv_path = str(args.csv)
         st.session_state.out_path = str(args.out)
-        st.session_state.idx = first_unlabeled_index(st.session_state.df, list(range(len(st.session_state.df))))
+        st.session_state.csv_mtime = csv_mtime
+        st.session_state.out_mtime = out_mtime
+        if old_idx < len(st.session_state.df):
+            st.session_state.idx = old_idx
+        else:
+            st.session_state.idx = first_unlabeled_index(st.session_state.df, list(range(len(st.session_state.df))))
     df = st.session_state.df
 
     st.sidebar.header('Filters')
