@@ -72,6 +72,12 @@ def load_template(robotwin_root: Path | None):
             "clear_cache_freq": 5,
             "collect_data": True,
             "eval_video_log": True,
+            "render": {
+                "camera_shader_dir": "rt",
+                "ray_tracing_samples_per_pixel": 128,
+                "ray_tracing_path_depth": 8,
+                "ray_tracing_denoiser": "",
+            },
         }
     return template
 
@@ -86,6 +92,30 @@ def validate_config_values(config: dict) -> None:
             )
         if value < 0 or value > limit:
             raise ValueError(f"{key} out of v0 safe range: {value} > {limit}")
+
+
+def validate_render_values(config: dict) -> None:
+    render = config.get("render") or {}
+    shader = render.get("camera_shader_dir", "rt")
+    if not isinstance(shader, str) or not shader:
+        raise ValueError(f"camera_shader_dir must be a non-empty string: {shader!r}")
+    spp = render.get("ray_tracing_samples_per_pixel", 128)
+    if isinstance(spp, bool) or not isinstance(spp, int):
+        raise ValueError(
+            f"ray_tracing_samples_per_pixel must be int, not {type(spp).__name__}: {spp!r}"
+        )
+    if spp < 1 or spp > 512:
+        raise ValueError(f"ray_tracing_samples_per_pixel out of safe range: {spp}")
+    depth = render.get("ray_tracing_path_depth", 8)
+    if isinstance(depth, bool) or not isinstance(depth, int):
+        raise ValueError(
+            f"ray_tracing_path_depth must be int, not {type(depth).__name__}: {depth!r}"
+        )
+    if depth < 1 or depth > 32:
+        raise ValueError(f"ray_tracing_path_depth out of safe range: {depth}")
+    denoiser = render.get("ray_tracing_denoiser", None)
+    if denoiser is not None and not isinstance(denoiser, str):
+        raise ValueError(f"ray_tracing_denoiser must be null or string: {denoiser!r}")
 
 
 def domain_randomization(name: str) -> dict:
@@ -127,6 +157,9 @@ def cfg(
     embodiment: str,
     template: dict,
     head_camera_type: str = "Large_D435",
+    rt_spp: int = 128,
+    rt_path_depth: int = 8,
+    rt_denoiser: str | None = None,
 ) -> dict:
     base = copy.deepcopy(template)
     base["episode_num"] = 5
@@ -162,6 +195,12 @@ def cfg(
         }
     )
     base["domain_randomization"] = domain_randomization(name)
+    base["render"] = {
+        "camera_shader_dir": "rt",
+        "ray_tracing_samples_per_pixel": int(rt_spp),
+        "ray_tracing_path_depth": int(rt_path_depth),
+        "ray_tracing_denoiser": rt_denoiser or "",
+    }
     base["worldarena_v0_constraints"] = {
         "target_domain": "RoboTwin2 Clean-50 Aloha-AgileX dual-arm gripper",
         "expected_action_dim": 14,
@@ -169,6 +208,7 @@ def cfg(
         "is_dual_arm_required": True,
     }
     validate_config_values(base)
+    validate_render_values(base)
     return base
 
 
@@ -206,6 +246,9 @@ def main():
         default="Large_D435",
         help="Use Large_D435 by default so v0 renders native 640x480 instead of upscaling D435 320x240.",
     )
+    parser.add_argument("--rt-spp", type=int, default=128)
+    parser.add_argument("--rt-path-depth", type=int, default=8)
+    parser.add_argument("--rt-denoiser", default="")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -227,7 +270,18 @@ def main():
         for embodiment in embodiments:
             cfg_name = f"{name}__{safe(embodiment)}"
             path = out / "configs_to_apply" / f"{cfg_name}.yml"
-            write_yaml(path, cfg(name, embodiment, template, args.head_camera_type))
+            write_yaml(
+                path,
+                cfg(
+                    name,
+                    embodiment,
+                    template,
+                    args.head_camera_type,
+                    args.rt_spp,
+                    args.rt_path_depth,
+                    args.rt_denoiser or None,
+                ),
+            )
             written.append(str(path))
             if args.apply and robotwin_root:
                 shutil.copy2(path, robotwin_root / "task_config" / f"{cfg_name}.yml")
@@ -239,7 +293,16 @@ def main():
             cfg_name = f"wa_probe_dual_arm__{safe(embodiment)}"
             path = out / "configs_to_apply" / f"{cfg_name}.yml"
             write_yaml(
-                path, cfg("wa_clean_fixed", embodiment, template, args.head_camera_type)
+                path,
+                cfg(
+                    "wa_clean_fixed",
+                    embodiment,
+                    template,
+                    args.head_camera_type,
+                    args.rt_spp,
+                    args.rt_path_depth,
+                    args.rt_denoiser or None,
+                ),
             )
             written.append(str(path))
             if args.apply and robotwin_root:

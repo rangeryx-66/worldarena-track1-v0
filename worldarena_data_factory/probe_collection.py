@@ -76,6 +76,9 @@ def main():
         default="Large_D435",
         help="Use Large_D435 by default to render native 640x480 clips for QC.",
     )
+    parser.add_argument("--rt-spp", type=int, default=128)
+    parser.add_argument("--rt-path-depth", type=int, default=8)
+    parser.add_argument("--rt-denoiser", default="")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -87,7 +90,18 @@ def main():
     for name in configs:
         cfg_name = f"{name}__aloha_agilex"
         path = out / "configs_to_apply" / f"{cfg_name}.yml"
-        write_yaml(path, cfg(name, "aloha-agilex", template, args.head_camera_type))
+        write_yaml(
+            path,
+            cfg(
+                name,
+                "aloha-agilex",
+                template,
+                args.head_camera_type,
+                args.rt_spp,
+                args.rt_path_depth,
+                args.rt_denoiser or None,
+            ),
+        )
         written_configs.append(str(path))
         if args.apply and robotwin_root:
             shutil.copy2(path, robotwin_root / "task_config" / f"{cfg_name}.yml")
@@ -137,6 +151,9 @@ def main():
         "episodes_per_task": args.episodes_per_task,
         "tasks": probe_tasks,
         "head_camera_type": args.head_camera_type,
+        "rt_spp": args.rt_spp,
+        "rt_path_depth": args.rt_path_depth,
+        "rt_denoiser": args.rt_denoiser or None,
         "jobs_csv": str(jobs_path),
         "written_configs": written_configs,
         "next_step": "Run run_robotwin_jobs.py with --jobs-csv probe_collection_jobs.csv, convert, inspect contact sheets, then set probe_pass true only after manual approval.",
