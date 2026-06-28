@@ -13,6 +13,20 @@ REASONS = [
     'action_video_mismatch','severe_flicker_or_exposure_jump','broken_or_black_frames','bad_compression_or_noise',
     'wrong_domain_or_wrong_robot','severe_physics_issue','ambiguous'
 ]
+REASON_LABELS_ZH = {
+    'good': '质量好 / 可用',
+    'robot_or_gripper_not_visible': '机器人或夹爪不可见',
+    'contact_not_visible': '关键接触不可见',
+    'object_moves_without_contact': '物体无接触移动',
+    'no_task_progress': '几乎无任务进展',
+    'action_video_mismatch': '动作和视频不匹配',
+    'severe_flicker_or_exposure_jump': '严重闪烁或曝光跳变',
+    'broken_or_black_frames': '坏帧或黑帧',
+    'bad_compression_or_noise': '压缩/噪声严重',
+    'wrong_domain_or_wrong_robot': '场景或机器人不对',
+    'severe_physics_issue': '严重物理问题',
+    'ambiguous': '不确定 / 边界样本',
+}
 GUIDE = '''
 **PASS** = 可以作为 SFT/A2V 正例训练数据。  
 **REJECT** = 不应该作为 SFT/A2V 正例。
@@ -187,7 +201,7 @@ def main():
 
         st.markdown('**Annotation**')
         label = st.radio('human_label', ['PASS','REJECT'], index=['PASS','REJECT'].index(default_label), horizontal=True, label_visibility='collapsed')
-        reason = st.multiselect('human_reason', REASONS, default=existing_reasons, label_visibility='collapsed')
+        reason = st.multiselect('human_reason', REASONS, default=existing_reasons, format_func=lambda x: REASON_LABELS_ZH.get(x, x), label_visibility='collapsed')
         confidence = st.select_slider(
             'human_confidence',
             options=['1','2','3'],
