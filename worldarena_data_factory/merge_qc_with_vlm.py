@@ -75,18 +75,42 @@ def vlm_obvious_visual_hard_reject(row: pd.Series) -> bool:
     return zero_count >= 6 or hard_flags or any(x in evidence for x in hard_phrases)
 
 
+def vlm_visual_artifact_only(row: pd.Series) -> bool:
+    if str(row.get('vlm_decision', '')).upper() != 'REJECT':
+        return False
+    good_keys = [
+        'score_domain_match', 'score_robot_visibility', 'score_gripper_contact_visibility',
+        'score_object_visibility', 'score_physical_plausibility', 'score_task_relevance',
+    ]
+    try:
+        semantic_ok = all(float(row.get(k, 0)) >= 2 for k in good_keys)
+    except Exception:
+        semantic_ok = False
+    bad_physical_flags = any(str(row.get(k, '')).lower() == 'true' for k in [
+        'flag_critical_contact_invisible', 'flag_object_moves_without_contact',
+        'flag_wrong_robot_or_missing_robot', 'flag_prompt_action_mismatch',
+    ])
+    visual_flag = str(row.get('flag_severe_flicker_or_exposure_jump', '')).lower() == 'true' or str(row.get('flag_severe_noise_or_compression', '')).lower() == 'true'
+    evidence = str(row.get('vlm_evidence', '')).lower()
+    mentions_only_visual = any(x in evidence for x in ['flicker', 'color shift', 'exposure', 'visual artifact', 'compression'])
+    return semantic_ok and visual_flag and mentions_only_visual and not bad_physical_flags
+
+
 def decide(row: pd.Series) -> tuple[str, str, bool]:
     rule_status = str(row.get('qc_status', '')).lower()
     vlm = str(row.get('vlm_decision', 'NEED_HUMAN_REVIEW')).upper()
     conf = float(row.get('vlm_confidence') or 0.0)
     hard = is_hard_fail(row)
+    visual_artifact_only = vlm_visual_artifact_only(row)
     obvious_visual_hard = vlm_obvious_visual_hard_reject(row)
     strong_rule_reject = rule_status == 'reject'
     strong_vlm_reject = vlm == 'REJECT' and conf >= 0.75
     strong_vlm_pass = vlm == 'PASS' and conf >= 0.75
-    conflict = (strong_rule_reject and strong_vlm_pass) or (rule_status == 'pass' and strong_vlm_reject and not obvious_visual_hard)
+    conflict = (strong_rule_reject and strong_vlm_pass) or (rule_status == 'pass' and strong_vlm_reject and not obvious_visual_hard and not visual_artifact_only)
     if hard:
         return 'REJECT', 'deterministic_hard_fail', conflict
+    if visual_artifact_only:
+        return 'WARN_KEEP', 'vlm_visual_artifact_only_warn_keep', False
     if obvious_visual_hard:
         return 'REJECT', 'vlm_obvious_visual_hard_reject', False
     if conflict:
