@@ -77,7 +77,9 @@ def merge_existing_annotations(base_df: pd.DataFrame, labeled_df: pd.DataFrame) 
 
     for idx, r in base_df.iterrows():
         key = (str(r.get('sample_id', '')), str(r.get('episode_id', '')))
-        old = keyed.get(key) or by_episode.get(str(r.get('episode_id', '')))
+        old = keyed.get(key)
+        if old is None:
+            old = by_episode.get(str(r.get('episode_id', '')))
         if old is None:
             continue
         for c in ANNOTATION_COLUMNS:

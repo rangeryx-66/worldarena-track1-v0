@@ -294,7 +294,10 @@ def preserve_existing_annotations(new_df: pd.DataFrame, out_dir: Path, csv_path:
 
     copied = 0
     for idx, r in new_df.iterrows():
-        old = keyed.get((safe_str(r.get('sample_id')), safe_str(r.get('episode_id')))) or by_episode.get(safe_str(r.get('episode_id')))
+        key = (safe_str(r.get('sample_id')), safe_str(r.get('episode_id')))
+        old = keyed.get(key)
+        if old is None:
+            old = by_episode.get(safe_str(r.get('episode_id')))
         if old is None:
             continue
         for c in ANNOTATION_FIELDS:
