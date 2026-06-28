@@ -22,15 +22,45 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from v0_1_vlm_qc import Qwen3VLBackend
 
 ABOT_QC_FIELDS = [
-    "episode_id", "task_family", "robotwin_task_name", "video_640x480_path", "action_joint14_raw_path",
-    "hard_filter_pass", "hard_fail_reason", "fps", "width", "height", "frame_count", "T",
-    "motion_score", "motion_active_ratio", "visual_motion_energy", "static_clip", "over_motion_clip",
-    "clip_temporal_coherence_score", "dino_temporal_coherence_score", "temporal_coherence_score",
-    "scene_cut_score", "duplicate_frame_ratio", "identity_jump_candidate",
-    "vlm_domain_score", "vlm_task_progress_score", "vlm_physics_score", "vlm_semantic_consistency_score",
-    "vlm_decision", "vlm_confidence", "vlm_evidence", "vlm_raw_output_path",
-    "action_motion_energy", "gripper_transition_count", "action_video_consistency_score",
-    "final_qc_status", "final_reason", "recommended_for_sft", "recommended_for_a2v", "recommended_for_dpo_loser",
+    "episode_id",
+    "task_family",
+    "robotwin_task_name",
+    "video_640x480_path",
+    "action_joint14_raw_path",
+    "hard_filter_pass",
+    "hard_fail_reason",
+    "fps",
+    "width",
+    "height",
+    "frame_count",
+    "T",
+    "motion_score",
+    "motion_active_ratio",
+    "visual_motion_energy",
+    "static_clip",
+    "over_motion_clip",
+    "clip_temporal_coherence_score",
+    "dino_temporal_coherence_score",
+    "temporal_coherence_score",
+    "scene_cut_score",
+    "duplicate_frame_ratio",
+    "identity_jump_candidate",
+    "vlm_domain_score",
+    "vlm_task_progress_score",
+    "vlm_physics_score",
+    "vlm_semantic_consistency_score",
+    "vlm_decision",
+    "vlm_confidence",
+    "vlm_evidence",
+    "vlm_raw_output_path",
+    "action_motion_energy",
+    "gripper_transition_count",
+    "action_video_consistency_score",
+    "final_qc_status",
+    "final_reason",
+    "recommended_for_sft",
+    "recommended_for_a2v",
+    "recommended_for_dpo_loser",
 ]
 
 
@@ -85,11 +115,13 @@ def normalize_vlm(obj: dict[str, Any]) -> dict[str, Any]:
     decision = str(obj.get("vlm_decision") or obj.get("decision") or "WARN").upper()
     if decision not in {"PASS", "WARN", "REJECT", "DPO_LOSER"}:
         decision = "WARN"
+
     def score(name: str, default: int = 1) -> int:
         try:
             return int(max(0, min(2, float(obj.get(name, default)))))
         except Exception:
             return default
+
     evidence = obj.get("evidence", [])
     if not isinstance(evidence, list):
         evidence = [str(evidence)]
@@ -105,7 +137,13 @@ def normalize_vlm(obj: dict[str, Any]) -> dict[str, Any]:
 
 
 class TemporalEmbeddingBackend:
-    def __init__(self, cache_dir: Path, clip_model: str, dino_model: str, local_files_only: bool = False):
+    def __init__(
+        self,
+        cache_dir: Path,
+        clip_model: str,
+        dino_model: str,
+        local_files_only: bool = False,
+    ):
         self.cache_dir = cache_dir
         self.clip_model_id = clip_model
         self.dino_model_id = dino_model
@@ -113,52 +151,98 @@ class TemporalEmbeddingBackend:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         try:
             import torch
-            from transformers import AutoImageProcessor, AutoModel, CLIPModel, CLIPProcessor
+            from transformers import (
+                AutoImageProcessor,
+                AutoModel,
+                CLIPModel,
+                CLIPProcessor,
+            )
         except Exception as exc:
-            raise RuntimeError("CLIP/DINO temporal coherence requires torch + transformers in this Python env") from exc
+            raise RuntimeError(
+                "CLIP/DINO temporal coherence requires torch + transformers in this Python env"
+            ) from exc
         self.torch = torch
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         try:
-            self.clip_processor = CLIPProcessor.from_pretrained(clip_model, cache_dir=str(cache_dir), local_files_only=local_files_only)
-            self.clip_model = CLIPModel.from_pretrained(clip_model, cache_dir=str(cache_dir), local_files_only=local_files_only).to(self.device).eval()
-            self.dino_processor = AutoImageProcessor.from_pretrained(dino_model, cache_dir=str(cache_dir), local_files_only=local_files_only)
-            self.dino_model = AutoModel.from_pretrained(dino_model, cache_dir=str(cache_dir), local_files_only=local_files_only).to(self.device).eval()
+            self.clip_processor = CLIPProcessor.from_pretrained(
+                clip_model, cache_dir=str(cache_dir), local_files_only=local_files_only
+            )
+            self.clip_model = (
+                CLIPModel.from_pretrained(
+                    clip_model,
+                    cache_dir=str(cache_dir),
+                    local_files_only=local_files_only,
+                )
+                .to(self.device)
+                .eval()
+            )
+            self.dino_processor = AutoImageProcessor.from_pretrained(
+                dino_model, cache_dir=str(cache_dir), local_files_only=local_files_only
+            )
+            self.dino_model = (
+                AutoModel.from_pretrained(
+                    dino_model,
+                    cache_dir=str(cache_dir),
+                    local_files_only=local_files_only,
+                )
+                .to(self.device)
+                .eval()
+            )
         except Exception as exc:
             raise RuntimeError(
                 "Failed to load/download CLIP or DINO. If network is needed, run: cd /root && source ./proxyon.sh, "
                 f"then rerun. cache_dir={cache_dir} clip={clip_model} dino={dino_model}"
             ) from exc
 
-    def embed_clip(self, pil_images: list[Image.Image], batch_size: int = 16) -> np.ndarray:
+    def embed_clip(
+        self, pil_images: list[Image.Image], batch_size: int = 16
+    ) -> np.ndarray:
         outs = []
         with self.torch.no_grad():
             for i in range(0, len(pil_images), batch_size):
-                batch = pil_images[i:i + batch_size]
-                inputs = self.clip_processor(images=batch, return_tensors="pt").to(self.device)
+                batch = pil_images[i : i + batch_size]
+                inputs = self.clip_processor(images=batch, return_tensors="pt").to(
+                    self.device
+                )
                 feats = self.clip_model.get_image_features(**inputs)
                 if not hasattr(feats, "norm"):
-                    if hasattr(feats, "image_embeds") and feats.image_embeds is not None:
+                    if (
+                        hasattr(feats, "image_embeds")
+                        and feats.image_embeds is not None
+                    ):
                         feats = feats.image_embeds
-                    elif hasattr(feats, "pooler_output") and feats.pooler_output is not None:
+                    elif (
+                        hasattr(feats, "pooler_output")
+                        and feats.pooler_output is not None
+                    ):
                         feats = feats.pooler_output
                     elif hasattr(feats, "last_hidden_state"):
                         feats = feats.last_hidden_state[:, 0]
                     elif isinstance(feats, (tuple, list)):
                         feats = feats[0]
                     else:
-                        raise TypeError(f"unsupported CLIP feature output type: {type(feats).__name__}")
+                        raise TypeError(
+                            f"unsupported CLIP feature output type: {type(feats).__name__}"
+                        )
                 feats = feats / feats.norm(dim=-1, keepdim=True).clamp_min(1e-6)
                 outs.append(feats.detach().cpu().float().numpy())
         return np.vstack(outs) if outs else np.zeros((0, 1), dtype=np.float32)
 
-    def embed_dino(self, pil_images: list[Image.Image], batch_size: int = 16) -> np.ndarray:
+    def embed_dino(
+        self, pil_images: list[Image.Image], batch_size: int = 16
+    ) -> np.ndarray:
         outs = []
         with self.torch.no_grad():
             for i in range(0, len(pil_images), batch_size):
-                batch = pil_images[i:i + batch_size]
-                inputs = self.dino_processor(images=batch, return_tensors="pt").to(self.device)
+                batch = pil_images[i : i + batch_size]
+                inputs = self.dino_processor(images=batch, return_tensors="pt").to(
+                    self.device
+                )
                 output = self.dino_model(**inputs)
-                if hasattr(output, "pooler_output") and output.pooler_output is not None:
+                if (
+                    hasattr(output, "pooler_output")
+                    and output.pooler_output is not None
+                ):
                     feats = output.pooler_output
                 else:
                     feats = output.last_hidden_state[:, 0]
@@ -166,7 +250,9 @@ class TemporalEmbeddingBackend:
                 outs.append(feats.detach().cpu().float().numpy())
         return np.vstack(outs) if outs else np.zeros((0, 1), dtype=np.float32)
 
-    def temporal_metrics(self, pil_images: list[Image.Image], gray_frames: list[np.ndarray]) -> dict[str, Any]:
+    def temporal_metrics(
+        self, pil_images: list[Image.Image], gray_frames: list[np.ndarray]
+    ) -> dict[str, Any]:
         if len(pil_images) < 2:
             return {
                 "clip_temporal_coherence_score": 0.0,
@@ -178,8 +264,12 @@ class TemporalEmbeddingBackend:
             }
         clip = self.embed_clip(pil_images)
         dino = self.embed_dino(pil_images)
-        clip_adj = np.sum(clip[:-1] * clip[1:], axis=1) if len(clip) > 1 else np.asarray([0.0])
-        dino_adj = np.sum(dino[:-1] * dino[1:], axis=1) if len(dino) > 1 else np.asarray([0.0])
+        clip_adj = (
+            np.sum(clip[:-1] * clip[1:], axis=1) if len(clip) > 1 else np.asarray([0.0])
+        )
+        dino_adj = (
+            np.sum(dino[:-1] * dino[1:], axis=1) if len(dino) > 1 else np.asarray([0.0])
+        )
         clip_coh = float(np.mean(clip_adj))
         dino_coh = float(np.mean(dino_adj))
         # CLIP is more robust to normal robot/object motion; DINO is sensitive to
@@ -195,7 +285,9 @@ class TemporalEmbeddingBackend:
             dup.append(float(mad < 1.0))
         duplicate_ratio = float(np.mean(dup)) if dup else 0.0
         temporal = float(0.5 * clip_coh + 0.5 * dino_coh)
-        identity_jump = bool(scene_cut > 0.55 and np.min(clip_adj) < 0.72 and np.min(dino_adj) < 0.45)
+        identity_jump = bool(
+            scene_cut > 0.55 and np.min(clip_adj) < 0.72 and np.min(dino_adj) < 0.45
+        )
         return {
             "clip_temporal_coherence_score": clip_coh,
             "dino_temporal_coherence_score": dino_coh,
@@ -221,8 +313,17 @@ def vlm_indices(frame_count: int, num_frames: int) -> list[int]:
     return sorted(set(int(round(x)) for x in np.linspace(0, frame_count - 1, n)))
 
 
-def read_video_sample(video_path: Path, sample_fps: float) -> tuple[dict[str, Any], list[np.ndarray], list[Image.Image], list[np.ndarray], int]:
-    meta = {"video_readable": False, "fps": 0.0, "width": 0, "height": 0, "frame_count": 0, "read_fail": 0}
+def read_video_sample(
+    video_path: Path, sample_fps: float
+) -> tuple[dict[str, Any], list[np.ndarray], list[Image.Image], list[np.ndarray], int]:
+    meta = {
+        "video_readable": False,
+        "fps": 0.0,
+        "width": 0,
+        "height": 0,
+        "frame_count": 0,
+        "read_fail": 0,
+    }
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return meta, [], [], [], 0
@@ -230,7 +331,15 @@ def read_video_sample(video_path: Path, sample_fps: float) -> tuple[dict[str, An
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    meta.update({"video_readable": True, "fps": fps, "width": width, "height": height, "frame_count": frame_count})
+    meta.update(
+        {
+            "video_readable": True,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "frame_count": frame_count,
+        }
+    )
     frames_bgr = []
     pil_images = []
     gray_frames = []
@@ -253,7 +362,13 @@ def read_video_sample(video_path: Path, sample_fps: float) -> tuple[dict[str, An
 
 def compute_motion_metrics(frames_bgr: list[np.ndarray]) -> dict[str, Any]:
     if len(frames_bgr) < 2:
-        return {"motion_score": 0.0, "visual_motion_energy": 0.0, "motion_active_ratio": 0.0, "static_clip": True, "over_motion_clip": False}
+        return {
+            "motion_score": 0.0,
+            "visual_motion_energy": 0.0,
+            "motion_active_ratio": 0.0,
+            "static_clip": True,
+            "over_motion_clip": False,
+        }
     means = []
     p95s = []
     active = []
@@ -261,7 +376,9 @@ def compute_motion_metrics(frames_bgr: list[np.ndarray]) -> dict[str, Any]:
     for frame in frames_bgr[1:]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         try:
-            flow = cv2.calcOpticalFlowFarneback(prev, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            flow = cv2.calcOpticalFlowFarneback(
+                prev, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+            )
             mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
         except Exception:
             mag = cv2.absdiff(prev, gray).astype(np.float32) / 8.0
@@ -286,7 +403,13 @@ def compute_motion_metrics(frames_bgr: list[np.ndarray]) -> dict[str, Any]:
 
 
 def validate_action(row: pd.Series) -> tuple[dict[str, Any], np.ndarray | None]:
-    path = Path(str(row.get("action_joint14_raw_path") or row.get("action_joint14_norm_path") or ""))
+    path = Path(
+        str(
+            row.get("action_joint14_raw_path")
+            or row.get("action_joint14_norm_path")
+            or ""
+        )
+    )
     result = {
         "action_valid": False,
         "action_reason": "action_missing",
@@ -308,10 +431,18 @@ def validate_action(row: pd.Series) -> tuple[dict[str, Any], np.ndarray | None]:
             result["action_reason"] = "action_nan_or_inf"
             return result, arr
         delta = np.diff(arr.astype(np.float32), axis=0)
-        arm_delta = np.concatenate([delta[:, :6], delta[:, 7:13]], axis=1) if len(delta) else np.zeros((0, 12), dtype=np.float32)
-        result["action_motion_energy"] = float(np.mean(np.linalg.norm(arm_delta, axis=1))) if len(arm_delta) else 0.0
+        arm_delta = (
+            np.concatenate([delta[:, :6], delta[:, 7:13]], axis=1)
+            if len(delta)
+            else np.zeros((0, 12), dtype=np.float32)
+        )
+        result["action_motion_energy"] = (
+            float(np.mean(np.linalg.norm(arm_delta, axis=1))) if len(arm_delta) else 0.0
+        )
         grip = arr[:, [6, 13]]
-        result["gripper_transition_count"] = int(np.sum(np.abs(np.diff((grip > 0.5).astype(np.int8), axis=0))))
+        result["gripper_transition_count"] = int(
+            np.sum(np.abs(np.diff((grip > 0.5).astype(np.int8), axis=0)))
+        )
         result["action_valid"] = True
         result["action_reason"] = "ok"
         return result, arr
@@ -402,19 +533,27 @@ Scores are 0 bad/absent, 1 acceptable or uncertain, 2 good.
 
 
 class DummyVLM:
-    def generate(self, prompt: str, image_paths: list[Path], video_path: Path | None = None) -> str:
-        return json.dumps({
-            "vlm_decision": "PASS",
-            "confidence": 0.75,
-            "vlm_domain_score": 2,
-            "vlm_task_progress_score": 1,
-            "vlm_physics_score": 1,
-            "vlm_semantic_consistency_score": 1,
-            "evidence": ["dummy backend: flow/temporal/action metrics decide final status"],
-        })
+    def generate(
+        self, prompt: str, image_paths: list[Path], video_path: Path | None = None
+    ) -> str:
+        return json.dumps(
+            {
+                "vlm_decision": "PASS",
+                "confidence": 0.75,
+                "vlm_domain_score": 2,
+                "vlm_task_progress_score": 1,
+                "vlm_physics_score": 1,
+                "vlm_semantic_consistency_score": 1,
+                "evidence": [
+                    "dummy backend: flow/temporal/action metrics decide final status"
+                ],
+            }
+        )
 
 
-def run_vlm(backend: Any, prompt: str, image_paths: list[Path], raw_path: Path, episode_id: str) -> dict[str, Any]:
+def run_vlm(
+    backend: Any, prompt: str, image_paths: list[Path], raw_path: Path, episode_id: str
+) -> dict[str, Any]:
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     last = ""
     for attempt in range(1, 4):
@@ -426,17 +565,24 @@ def run_vlm(backend: Any, prompt: str, image_paths: list[Path], raw_path: Path, 
             return normalize_vlm(json_extract(text))
         except Exception as exc:
             with raw_path.open("a", encoding="utf-8") as f:
-                f.write(f"\n--- parse/generate error attempt {attempt} ---\n{type(exc).__name__}: {exc}\n{last[:1500]}\n")
-            prompt = "Return only valid JSON matching the requested schema. Use WARN if uncertain. Previous output:\n" + last[:1500]
-    return normalize_vlm({
-        "vlm_decision": "WARN",
-        "confidence": 0.0,
-        "vlm_domain_score": 1,
-        "vlm_task_progress_score": 1,
-        "vlm_physics_score": 1,
-        "vlm_semantic_consistency_score": 1,
-        "evidence": ["VLM failed to produce parseable JSON"],
-    })
+                f.write(
+                    f"\n--- parse/generate error attempt {attempt} ---\n{type(exc).__name__}: {exc}\n{last[:1500]}\n"
+                )
+            prompt = (
+                "Return only valid JSON matching the requested schema. Use WARN if uncertain. Previous output:\n"
+                + last[:1500]
+            )
+    return normalize_vlm(
+        {
+            "vlm_decision": "WARN",
+            "confidence": 0.0,
+            "vlm_domain_score": 1,
+            "vlm_task_progress_score": 1,
+            "vlm_physics_score": 1,
+            "vlm_semantic_consistency_score": 1,
+            "evidence": ["VLM failed to produce parseable JSON"],
+        }
+    )
 
 
 def final_decision(row: dict[str, Any]) -> tuple[str, str]:
@@ -455,7 +601,11 @@ def final_decision(row: dict[str, Any]) -> tuple[str, str]:
         reasons.append("vlm_reject")
     if row["vlm_decision"] == "DPO_LOSER" and row["vlm_confidence"] >= 0.60:
         return "DPO_LOSER", "vlm_dpo_loser;" + ";".join(reasons)
-    if row["vlm_task_progress_score"] == 0 or row["vlm_physics_score"] == 0 or row["vlm_semantic_consistency_score"] == 0:
+    if (
+        row["vlm_task_progress_score"] == 0
+        or row["vlm_physics_score"] == 0
+        or row["vlm_semantic_consistency_score"] == 0
+    ):
         reasons.append("vlm_zero_task_physics_or_semantic_score")
     if row["action_video_consistency_score"] < 0.35:
         reasons.append("low_action_video_consistency")
@@ -465,7 +615,13 @@ def final_decision(row: dict[str, Any]) -> tuple[str, str]:
         reasons.append("many_gripper_transitions_low_task_progress")
     if row["visual_motion_energy"] > 2.0 and row["action_motion_energy"] < 0.003:
         return "DPO_LOSER", "visual_motion_large_action_weak"
-    severe = {"static_clip", "over_motion_clip", "temporal_identity_jump_or_scene_cut", "vlm_reject", "vlm_zero_task_physics_or_semantic_score"}
+    severe = {
+        "static_clip",
+        "over_motion_clip",
+        "temporal_identity_jump_or_scene_cut",
+        "vlm_reject",
+        "vlm_zero_task_physics_or_semantic_score",
+    }
     if any(r in severe for r in reasons):
         return "REJECT", ";".join(reasons)
     if reasons:
@@ -491,7 +647,9 @@ def append_score(path: Path, row: dict[str, Any]) -> None:
         w.writerow({k: row.get(k, "") for k in ABOT_QC_FIELDS})
 
 
-def make_sample_sheet(df: pd.DataFrame, out_path: Path, title: str, n: int = 36) -> None:
+def make_sample_sheet(
+    df: pd.DataFrame, out_path: Path, title: str, n: int = 36
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if df.empty:
         img = Image.new("RGB", (640, 160), "white")
@@ -521,7 +679,12 @@ def make_sample_sheet(df: pd.DataFrame, out_path: Path, title: str, n: int = 36)
         canvas = Image.new("RGB", (tw, th), "white")
         canvas.paste(img, ((tw - img.width) // 2, (th - img.height) // 2))
         sheet.paste(canvas, (x, y))
-        draw.text((x + 3, y + th + 2), f"{row.get('episode_id','')}\n{row.get('final_reason','')[:60]}", fill=(0, 0, 0), font=font)
+        draw.text(
+            (x + 3, y + th + 2),
+            f"{row.get('episode_id','')}\n{row.get('final_reason','')[:60]}",
+            fill=(0, 0, 0),
+            font=font,
+        )
     sheet.save(out_path, quality=92)
 
 
@@ -531,20 +694,51 @@ def write_report(out: Path, scores: pd.DataFrame) -> None:
         for part in str(reason).split(";"):
             if part:
                 reasons[part] += 1
-    counts = scores["final_qc_status"].value_counts(dropna=False).to_dict() if not scores.empty else {}
+    counts = (
+        scores["final_qc_status"].value_counts(dropna=False).to_dict()
+        if not scores.empty
+        else {}
+    )
     step_counts = {
-        "hard_filter_reject": int((scores["hard_filter_pass"] == False).sum()) if "hard_filter_pass" in scores else 0,
-        "static_clip": int(scores["static_clip"].sum()) if "static_clip" in scores else 0,
-        "over_motion_clip": int(scores["over_motion_clip"].sum()) if "over_motion_clip" in scores else 0,
-        "identity_jump_candidate": int(scores["identity_jump_candidate"].sum()) if "identity_jump_candidate" in scores else 0,
-        "vlm_reject": int((scores["vlm_decision"] == "REJECT").sum()) if "vlm_decision" in scores else 0,
-        "vlm_dpo_loser": int((scores["vlm_decision"] == "DPO_LOSER").sum()) if "vlm_decision" in scores else 0,
-        "low_action_video_consistency": int((scores["action_video_consistency_score"] < 0.35).sum()) if "action_video_consistency_score" in scores else 0,
+        "hard_filter_reject": (
+            int((scores["hard_filter_pass"] == False).sum())
+            if "hard_filter_pass" in scores
+            else 0
+        ),
+        "static_clip": (
+            int(scores["static_clip"].sum()) if "static_clip" in scores else 0
+        ),
+        "over_motion_clip": (
+            int(scores["over_motion_clip"].sum()) if "over_motion_clip" in scores else 0
+        ),
+        "identity_jump_candidate": (
+            int(scores["identity_jump_candidate"].sum())
+            if "identity_jump_candidate" in scores
+            else 0
+        ),
+        "vlm_reject": (
+            int((scores["vlm_decision"] == "REJECT").sum())
+            if "vlm_decision" in scores
+            else 0
+        ),
+        "vlm_dpo_loser": (
+            int((scores["vlm_decision"] == "DPO_LOSER").sum())
+            if "vlm_decision" in scores
+            else 0
+        ),
+        "low_action_video_consistency": (
+            int((scores["action_video_consistency_score"] < 0.35).sum())
+            if "action_video_consistency_score" in scores
+            else 0
+        ),
     }
     lines = [
-        "# ABot-PhysWorld Style QC Report", "",
-        f"Episodes checked: `{len(scores)}`", "",
-        "## Final QC Status", "",
+        "# ABot-PhysWorld Style QC Report",
+        "",
+        f"Episodes checked: `{len(scores)}`",
+        "",
+        "## Final QC Status",
+        "",
     ]
     for k in ["PASS", "WARN", "REJECT", "DPO_LOSER"]:
         lines.append(f"- `{k}`: `{counts.get(k, 0)}`")
@@ -555,7 +749,9 @@ def write_report(out: Path, scores: pd.DataFrame) -> None:
     for reason, count in reasons.most_common(30):
         lines.append(f"- `{reason}`: `{count}`")
     lines += [
-        "", "## Training Recommendations", "",
+        "",
+        "## Training Recommendations",
+        "",
         "- SFT: use `episode_manifest_abot_qc_pass.parquet` only.",
         "- A2V: use PASS and manually reviewed/low-weight WARN only.",
         "- DPO loser bank: use `dpo_loser_candidates_abot_qc.csv`.",
@@ -567,23 +763,56 @@ def write_report(out: Path, scores: pd.DataFrame) -> None:
 def finalize_outputs(out: Path, manifest: pd.DataFrame, scores: pd.DataFrame) -> None:
     scores = scores.drop_duplicates("episode_id", keep="last")
     scores.to_csv(out / "abot_qc_scores.csv", index=False)
-    full = manifest.merge(scores, on=["episode_id", "task_family", "robotwin_task_name", "video_640x480_path", "action_joint14_raw_path"], how="inner")
-    full[full["final_qc_status"] == "PASS"].to_parquet(out / "episode_manifest_abot_qc_pass.parquet", index=False)
-    full[full["final_qc_status"] == "WARN"].to_parquet(out / "episode_manifest_abot_qc_warn.parquet", index=False)
-    full[full["final_qc_status"] == "REJECT"].to_parquet(out / "episode_manifest_abot_qc_reject.parquet", index=False)
-    full[full["final_qc_status"] == "DPO_LOSER"].to_csv(out / "dpo_loser_candidates_abot_qc.csv", index=False)
+    full = manifest.merge(
+        scores,
+        on=[
+            "episode_id",
+            "task_family",
+            "robotwin_task_name",
+            "video_640x480_path",
+            "action_joint14_raw_path",
+        ],
+        how="inner",
+    )
+    full[full["final_qc_status"] == "PASS"].to_parquet(
+        out / "episode_manifest_abot_qc_pass.parquet", index=False
+    )
+    full[full["final_qc_status"] == "WARN"].to_parquet(
+        out / "episode_manifest_abot_qc_warn.parquet", index=False
+    )
+    full[full["final_qc_status"] == "REJECT"].to_parquet(
+        out / "episode_manifest_abot_qc_reject.parquet", index=False
+    )
+    full[full["final_qc_status"] == "DPO_LOSER"].to_csv(
+        out / "dpo_loser_candidates_abot_qc.csv", index=False
+    )
     cs = out / "contact_sheets"
-    make_sample_sheet(full[full["final_qc_status"] == "PASS"], cs / "pass_samples.jpg", "ABot QC PASS samples")
-    make_sample_sheet(full[full["final_qc_status"] == "WARN"], cs / "warn_samples.jpg", "ABot QC WARN samples")
-    make_sample_sheet(full[full["final_qc_status"] == "REJECT"], cs / "reject_samples.jpg", "ABot QC REJECT samples")
+    make_sample_sheet(
+        full[full["final_qc_status"] == "PASS"],
+        cs / "pass_samples.jpg",
+        "ABot QC PASS samples",
+    )
+    make_sample_sheet(
+        full[full["final_qc_status"] == "WARN"],
+        cs / "warn_samples.jpg",
+        "ABot QC WARN samples",
+    )
+    make_sample_sheet(
+        full[full["final_qc_status"] == "REJECT"],
+        cs / "reject_samples.jpg",
+        "ABot QC REJECT samples",
+    )
     review = full[full["final_qc_status"].isin(["WARN", "DPO_LOSER"])]
-    make_sample_sheet(review, cs / "vlm_review_samples.jpg", "ABot QC VLM/manual review samples")
+    make_sample_sheet(
+        review, cs / "vlm_review_samples.jpg", "ABot QC VLM/manual review samples"
+    )
     write_report(out, scores)
 
 
 def progress_iter(iterator, total: int, interval: int = 10):
     try:
         from tqdm import tqdm
+
         yield from tqdm(iterator, total=total, desc="abot-qc", dynamic_ncols=True)
         return
     except Exception:
@@ -596,15 +825,26 @@ def progress_iter(iterator, total: int, interval: int = 10):
             elapsed = max(1e-6, time.time() - start)
             rate = i / elapsed
             eta = (total - i) / max(rate, 1e-6)
-            print(f"abot-qc {i}/{total} ({i/total:.1%}) rate={rate:.3f}/s eta={eta/60:.1f}min", flush=True)
+            print(
+                f"abot-qc {i}/{total} ({i/total:.1%}) rate={rate:.3f}/s eta={eta/60:.1f}min",
+                flush=True,
+            )
             last = i
 
 
-def process_episode(row: pd.Series, args: argparse.Namespace, temporal: TemporalEmbeddingBackend, vlm_backend: Any, out: Path) -> dict[str, Any]:
+def process_episode(
+    row: pd.Series,
+    args: argparse.Namespace,
+    temporal: TemporalEmbeddingBackend,
+    vlm_backend: Any,
+    out: Path,
+) -> dict[str, Any]:
     episode_id = str(row.get("episode_id"))
     video_path = Path(str(row.get("video_640x480_path") or ""))
     action_info, _ = validate_action(row)
-    meta, frames_bgr, pil_images, gray_frames, read_fail = read_video_sample(video_path, args.sample_fps)
+    meta, frames_bgr, pil_images, gray_frames, read_fail = read_video_sample(
+        video_path, args.sample_fps
+    )
     hard_reasons = []
     if not video_path.exists():
         hard_reasons.append("video_missing")
@@ -619,7 +859,15 @@ def process_episode(row: pd.Series, args: argparse.Namespace, temporal: Temporal
             hard_reasons.append("frame_count_too_short")
         if not frames_bgr:
             hard_reasons.append("no_decodable_sample_frames")
-        if read_fail > max(2, len(sample_indices(int(meta["frame_count"]), float(meta["fps"]), args.sample_fps)) // 4):
+        if read_fail > max(
+            2,
+            len(
+                sample_indices(
+                    int(meta["frame_count"]), float(meta["fps"]), args.sample_fps
+                )
+            )
+            // 4,
+        ):
             hard_reasons.append("many_sample_frames_failed")
     if not action_info["action_valid"]:
         hard_reasons.append(action_info["action_reason"])
@@ -647,12 +895,18 @@ def process_episode(row: pd.Series, args: argparse.Namespace, temporal: Temporal
     if args.backend == "dummy" or args.dry_run:
         vlm = normalize_vlm(json.loads(DummyVLM().generate("", image_paths)))
     else:
-        vlm = run_vlm(vlm_backend, build_vlm_prompt(row), image_paths, raw_vlm_path, episode_id)
+        vlm = run_vlm(
+            vlm_backend, build_vlm_prompt(row), image_paths, raw_vlm_path, episode_id
+        )
     if args.backend == "dummy" or args.dry_run:
         raw_vlm_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_vlm_path.write_text(json.dumps(vlm, ensure_ascii=False, indent=2), encoding="utf-8")
+        raw_vlm_path.write_text(
+            json.dumps(vlm, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
-    consistency = action_video_consistency(action_info["action_motion_energy"], motion["visual_motion_energy"])
+    consistency = action_video_consistency(
+        action_info["action_motion_energy"], motion["visual_motion_energy"]
+    )
     result = {
         "episode_id": episode_id,
         "task_family": row.get("task_family", ""),
@@ -675,25 +929,31 @@ def process_episode(row: pd.Series, args: argparse.Namespace, temporal: Temporal
         "action_video_consistency_score": consistency,
     }
     status, reason = final_decision(result)
-    result.update({
-        "final_qc_status": status,
-        "final_reason": reason,
-        "recommended_for_sft": status == "PASS",
-        "recommended_for_a2v": status in {"PASS", "WARN"},
-        "recommended_for_dpo_loser": status == "DPO_LOSER",
-    })
+    result.update(
+        {
+            "final_qc_status": status,
+            "final_reason": reason,
+            "recommended_for_sft": status == "PASS",
+            "recommended_for_a2v": status in {"PASS", "WARN"},
+            "recommended_for_dpo_loser": status == "DPO_LOSER",
+        }
+    )
     return result
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="ABot-PhysWorld style manipulation clip QC")
+    ap = argparse.ArgumentParser(
+        description="ABot-PhysWorld style manipulation clip QC"
+    )
     ap.add_argument("--manifest", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--sample-fps", type=float, default=2.0)
     ap.add_argument("--num-vlm-frames", type=int, default=12)
     ap.add_argument("--backend", choices=["qwen3-vl", "dummy"], default="qwen3-vl")
     ap.add_argument("--model-path", default="/root/autodl-tmp/qwen3vl8b")
-    ap.add_argument("--model-cache-dir", default="/root/autodl-tmp/model_cache/abot_style_qc")
+    ap.add_argument(
+        "--model-cache-dir", default="/root/autodl-tmp/model_cache/abot_style_qc"
+    )
     ap.add_argument("--clip-model", default="openai/clip-vit-base-patch32")
     ap.add_argument("--dino-model", default="facebook/dinov2-small")
     ap.add_argument("--local-files-only", action="store_true")
@@ -710,21 +970,55 @@ def main() -> None:
     if args.max_samples:
         manifest = manifest.head(args.max_samples).copy()
     scores_path = out / "abot_qc_scores.csv"
-    existing = existing_scores(scores_path) if args.resume else pd.DataFrame(columns=ABOT_QC_FIELDS)
-    done = set(existing["episode_id"].astype(str).tolist()) if not existing.empty else set()
+    existing = (
+        existing_scores(scores_path)
+        if args.resume
+        else pd.DataFrame(columns=ABOT_QC_FIELDS)
+    )
+    done = (
+        set(existing["episode_id"].astype(str).tolist())
+        if not existing.empty
+        else set()
+    )
 
-    temporal = TemporalEmbeddingBackend(Path(args.model_cache_dir), args.clip_model, args.dino_model, args.local_files_only)
+    temporal = TemporalEmbeddingBackend(
+        Path(args.model_cache_dir),
+        args.clip_model,
+        args.dino_model,
+        args.local_files_only,
+    )
     if args.backend == "dummy" or args.dry_run:
         vlm_backend = DummyVLM()
     else:
         vlm_backend = Qwen3VLBackend(args.model_path, mode="contact_sheet")
 
-    rows = [row for _, row in manifest.iterrows() if str(row.get("episode_id")) not in done]
+    rows = [
+        row for _, row in manifest.iterrows() if str(row.get("episode_id")) not in done
+    ]
     for row in progress_iter(rows, len(rows), args.progress_interval):
         result = process_episode(row, args, temporal, vlm_backend, out)
         append_score(scores_path, result)
         with (out / "vlm_qc_results.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps({k: result.get(k) for k in ["episode_id", "vlm_decision", "vlm_confidence", "vlm_domain_score", "vlm_task_progress_score", "vlm_physics_score", "vlm_semantic_consistency_score", "vlm_evidence", "vlm_raw_output_path"]}, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        k: result.get(k)
+                        for k in [
+                            "episode_id",
+                            "vlm_decision",
+                            "vlm_confidence",
+                            "vlm_domain_score",
+                            "vlm_task_progress_score",
+                            "vlm_physics_score",
+                            "vlm_semantic_consistency_score",
+                            "vlm_evidence",
+                            "vlm_raw_output_path",
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
     scores = existing_scores(scores_path)
     # Keep only selected manifest rows when max_samples is used, otherwise all completed rows.
@@ -733,7 +1027,11 @@ def main() -> None:
         scores = scores[scores["episode_id"].astype(str).isin(allowed)]
     finalize_outputs(out, manifest, scores)
     print(f"wrote {out / 'abot_qc_scores.csv'} rows={len(scores)}")
-    print(scores["final_qc_status"].value_counts(dropna=False).to_dict() if not scores.empty else {})
+    print(
+        scores["final_qc_status"].value_counts(dropna=False).to_dict()
+        if not scores.empty
+        else {}
+    )
 
 
 if __name__ == "__main__":

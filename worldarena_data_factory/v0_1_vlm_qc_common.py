@@ -13,14 +13,27 @@ from PIL import Image, ImageDraw, ImageFont
 
 DECISIONS = ["PASS", "WARN_KEEP", "REJECT", "DPO_LOSER_CANDIDATE", "NEED_HUMAN_REVIEW"]
 SCORE_KEYS = [
-    "domain_match", "robot_visibility", "gripper_contact_visibility", "object_visibility",
-    "physical_plausibility", "temporal_consistency", "visual_quality", "task_relevance",
-    "sft_positive_suitability", "a2v_positive_suitability", "dpo_loser_suitability",
+    "domain_match",
+    "robot_visibility",
+    "gripper_contact_visibility",
+    "object_visibility",
+    "physical_plausibility",
+    "temporal_consistency",
+    "visual_quality",
+    "task_relevance",
+    "sft_positive_suitability",
+    "a2v_positive_suitability",
+    "dpo_loser_suitability",
 ]
 FLAG_KEYS = [
-    "arm_partially_out_of_frame_but_ok", "critical_contact_invisible", "object_moves_without_contact",
-    "severe_flicker_or_exposure_jump", "severe_noise_or_compression", "wrong_robot_or_missing_robot",
-    "prompt_action_mismatch", "possible_left_right_swap",
+    "arm_partially_out_of_frame_but_ok",
+    "critical_contact_invisible",
+    "object_moves_without_contact",
+    "severe_flicker_or_exposure_jump",
+    "severe_noise_or_compression",
+    "wrong_robot_or_missing_robot",
+    "prompt_action_mismatch",
+    "possible_left_right_swap",
 ]
 
 
@@ -38,7 +51,11 @@ def resolve_manifest(path: Path) -> Path:
 
 
 def read_table(path: Path) -> pd.DataFrame:
-    path = resolve_manifest(path) if path.name == "episode_manifest.parquet" or path.is_dir() else path
+    path = (
+        resolve_manifest(path)
+        if path.name == "episode_manifest.parquet" or path.is_dir()
+        else path
+    )
     if path.suffix == ".parquet":
         return pd.read_parquet(path)
     if path.suffix == ".csv":
@@ -95,12 +112,18 @@ def normalize_vlm_result(obj: dict[str, Any]) -> dict[str, Any]:
         decision = "NEED_HUMAN_REVIEW"
     scores = obj.get("scores") if isinstance(obj.get("scores"), dict) else {}
     flags = obj.get("flags") if isinstance(obj.get("flags"), dict) else {}
-    rec = obj.get("recommended_use") if isinstance(obj.get("recommended_use"), dict) else {}
+    rec = (
+        obj.get("recommended_use")
+        if isinstance(obj.get("recommended_use"), dict)
+        else {}
+    )
     evidence = obj.get("evidence") if isinstance(obj.get("evidence"), list) else []
     return {
         "overall_decision": decision,
         "confidence": max(0.0, min(1.0, safe_float(obj.get("confidence"), 0.0))),
-        "scores": {k: int(max(0, min(2, safe_float(scores.get(k), 1)))) for k in SCORE_KEYS},
+        "scores": {
+            k: int(max(0, min(2, safe_float(scores.get(k), 1)))) for k in SCORE_KEYS
+        },
         "flags": {k: bool(flags.get(k, False)) for k in FLAG_KEYS},
         "evidence": [str(x)[:240] for x in evidence[:6]],
         "recommended_use": {
@@ -124,7 +147,9 @@ def strict_json_from_text(text: str) -> dict[str, Any]:
 
 
 def mock_vlm_from_rule(rule: dict[str, Any]) -> dict[str, Any]:
-    hard = str(rule.get("deterministic_hard_fail", "")).lower() == "true" or bool(rule.get("deterministic_hard_fail", False))
+    hard = str(rule.get("deterministic_hard_fail", "")).lower() == "true" or bool(
+        rule.get("deterministic_hard_fail", False)
+    )
     labels = str(rule.get("heuristic_candidate_labels", ""))
     status = str(rule.get("qc_status", "pass")).lower()
     if hard:
@@ -137,35 +162,49 @@ def mock_vlm_from_rule(rule: dict[str, Any]) -> dict[str, Any]:
         decision, conf = "WARN_KEEP", 0.65
     else:
         decision, conf = "WARN_KEEP", 0.68
-    visual_quality = 1 if ("color_shift" in labels or "temporal_flicker" in labels) else 2
+    visual_quality = (
+        1 if ("color_shift" in labels or "temporal_flicker" in labels) else 2
+    )
     scores = {k: 1 for k in SCORE_KEYS}
-    scores.update({
-        "domain_match": 2, "robot_visibility": 2, "object_visibility": 2,
-        "physical_plausibility": 1 if decision == "DPO_LOSER_CANDIDATE" else 2,
-        "temporal_consistency": visual_quality, "visual_quality": visual_quality,
-        "sft_positive_suitability": 2 if decision == "PASS" else 1,
-        "a2v_positive_suitability": 2 if decision == "PASS" else 1,
-        "dpo_loser_suitability": 2 if decision == "DPO_LOSER_CANDIDATE" else 0,
-    })
+    scores.update(
+        {
+            "domain_match": 2,
+            "robot_visibility": 2,
+            "object_visibility": 2,
+            "physical_plausibility": 1 if decision == "DPO_LOSER_CANDIDATE" else 2,
+            "temporal_consistency": visual_quality,
+            "visual_quality": visual_quality,
+            "sft_positive_suitability": 2 if decision == "PASS" else 1,
+            "a2v_positive_suitability": 2 if decision == "PASS" else 1,
+            "dpo_loser_suitability": 2 if decision == "DPO_LOSER_CANDIDATE" else 0,
+        }
+    )
     flags = {k: False for k in FLAG_KEYS}
     flags["severe_flicker_or_exposure_jump"] = "strong_color_or_exposure_jump" in labels
     flags["object_moves_without_contact"] = "possible_motion_without_contact" in labels
-    return normalize_vlm_result({
-        "overall_decision": decision,
-        "confidence": conf,
-        "scores": scores,
-        "flags": flags,
-        "evidence": ["dummy backend decision from rule QC context", labels or "no heuristic labels"],
-        "recommended_use": {
-            "use_for_sft": decision == "PASS",
-            "use_for_a2v": decision in {"PASS", "WARN_KEEP"},
-            "use_for_dpo_winner": decision == "PASS",
-            "use_for_dpo_loser": decision == "DPO_LOSER_CANDIDATE",
-        },
-    })
+    return normalize_vlm_result(
+        {
+            "overall_decision": decision,
+            "confidence": conf,
+            "scores": scores,
+            "flags": flags,
+            "evidence": [
+                "dummy backend decision from rule QC context",
+                labels or "no heuristic labels",
+            ],
+            "recommended_use": {
+                "use_for_sft": decision == "PASS",
+                "use_for_a2v": decision in {"PASS", "WARN_KEEP"},
+                "use_for_dpo_winner": decision == "PASS",
+                "use_for_dpo_loser": decision == "DPO_LOSER_CANDIDATE",
+            },
+        }
+    )
 
 
-def make_contact_sheet(df: pd.DataFrame, out_path: Path, title: str, n: int = 36) -> None:
+def make_contact_sheet(
+    df: pd.DataFrame, out_path: Path, title: str, n: int = 36
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     thumb_w, thumb_h, label_h, cols = 160, 120, 36, 6
     if df.empty:
@@ -183,7 +222,9 @@ def make_contact_sheet(df: pd.DataFrame, out_path: Path, title: str, n: int = 36
         x = (i % cols) * thumb_w
         y = 30 + (i // cols) * (thumb_h + label_h)
         img = None
-        fp = str(row.get("first_frame_320x240_path") or row.get("first_frame_path") or "")
+        fp = str(
+            row.get("first_frame_320x240_path") or row.get("first_frame_path") or ""
+        )
         if fp and Path(fp).exists():
             try:
                 img = Image.open(fp).convert("RGB")
