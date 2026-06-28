@@ -80,7 +80,7 @@ def main():
         '''
 <style>
   .block-container {
-    padding-top: 0.35rem;
+    padding-top: 1.15rem;
     padding-bottom: 0.4rem;
     padding-left: 0.65rem;
     padding-right: 0.65rem;
