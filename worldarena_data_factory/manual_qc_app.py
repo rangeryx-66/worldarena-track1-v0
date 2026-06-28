@@ -61,6 +61,13 @@ def first_unlabeled_index(df: pd.DataFrame, indices: list[int], start_after: int
     return indices[0] if indices else 0
 
 
+def show_video_compact(st, video_path: Path, width: int = 430):
+    try:
+        st.video(str(video_path), width=width)
+    except TypeError:
+        st.video(str(video_path))
+
+
 def main():
     args=parse_args()
     try:
@@ -69,6 +76,32 @@ def main():
         raise SystemExit('Streamlit is not installed. Install with: pip install streamlit') from exc
 
     st.set_page_config(page_title='Manual QC 500', layout='wide')
+    st.markdown(
+        '''
+<style>
+  .block-container {
+    padding-top: 0.35rem;
+    padding-bottom: 0.4rem;
+    padding-left: 0.65rem;
+    padding-right: 0.65rem;
+    max-width: 1680px;
+  }
+  [data-testid="stVerticalBlock"] { gap: 0.28rem; }
+  [data-testid="stHorizontalBlock"] { gap: 0.45rem; }
+  h1 { font-size: 1.25rem !important; margin: 0 0 0.15rem 0 !important; }
+  h2, h3 { font-size: 0.95rem !important; margin: 0.15rem 0 !important; }
+  p, li, label, .stMarkdown, .stCaption { font-size: 0.88rem !important; }
+  div[data-testid="stMetric"] { padding: 0.05rem 0; }
+  div[data-testid="stMetricValue"] { font-size: 1.0rem; }
+  div[data-testid="stMetricLabel"] { font-size: 0.72rem; }
+  .stButton button { padding: 0.22rem 0.45rem; min-height: 1.9rem; }
+  div[data-baseweb="tab-list"] { gap: 0.25rem; }
+  button[data-baseweb="tab"] { padding: 0.2rem 0.45rem; height: 1.9rem; }
+  .stTextArea textarea { font-size: 0.82rem; }
+</style>
+''',
+        unsafe_allow_html=True,
+    )
     if 'df' not in st.session_state or st.session_state.get('csv_path') != str(args.csv) or st.session_state.get('out_path') != str(args.out):
         st.session_state.df = load_data(args.csv, args.out)
         st.session_state.csv_path = str(args.csv)
@@ -88,6 +121,10 @@ def main():
     hl = st.sidebar.selectbox('human_label', labels)
     confs = ['all','1','2','3']
     hc = st.sidebar.selectbox('human_confidence', confs)
+    with st.sidebar:
+        st.markdown('---')
+        with st.expander('Guideline', expanded=False):
+            st.markdown(GUIDE)
 
     mask = pd.Series(True, index=df.index)
     if only_unlabeled: mask &= df['human_label'].astype(str).eq('')
@@ -107,20 +144,15 @@ def main():
     reject_n = df['human_label'].astype(str).eq('REJECT').sum()
     current = df.loc[st.session_state.idx]
 
-    st.title('Manual QC 500')
-    c1,c2,c3,c4,c5 = st.columns(5)
+    st.markdown(f"### Manual QC 500 · `{current.get('episode_id','')}`")
+    c1,c2,c3,c4,c5 = st.columns([1.05,0.7,0.75,0.8,0.9])
     c1.metric('Labeled / Total', f'{labeled} / {len(df)}')
     c2.metric('PASS', int(pass_n))
     c3.metric('REJECT', int(reject_n))
     c4.metric('Current index', int(st.session_state.idx))
     c5.metric('Group', str(current.get('sample_group','')))
 
-    with st.sidebar:
-        st.markdown('---')
-        st.subheader('Guideline')
-        st.markdown(GUIDE)
-
-    j1,j2,j3 = st.columns([2,2,1])
+    j1,j2,j3 = st.columns([1.4,0.35,0.55])
     jump_text = j1.text_input('Jump to sample_id / episode_id', value='')
     if j2.button('Jump') and jump_text.strip():
         m = df[(df['sample_id'].astype(str)==jump_text.strip()) | (df['episode_id'].astype(str)==jump_text.strip())]
@@ -131,47 +163,55 @@ def main():
     if j3.button('Next unlabeled'):
         st.session_state.idx = first_unlabeled_index(df, indices, st.session_state.idx); st.rerun()
 
-    left, right = st.columns([1.1,1.4])
-    with left:
-        st.subheader(str(current.get('episode_id','')))
-        st.write({
-            'sample_id': current.get('sample_id',''),
-            'task_family': current.get('task_family',''),
-            'robotwin_task_name': current.get('robotwin_task_name',''),
-            'T': current.get('T',''),
-            'action_complexity_score': current.get('action_complexity_score',''),
-            'dominant_arm': current.get('dominant_arm',''),
-            'current_qc_status': current.get('current_qc_status',''),
-            'current_qc_reason': current.get('current_qc_reason',''),
-            'current_qc_labels': current.get('current_qc_labels',''),
-        })
-        st.markdown('**Prompt**')
-        st.code(str(current.get('prompt_short','')))
-        st.markdown('**Risk summary**')
-        st.text_area('risk_summary', str(current.get('risk_summary','')), height=160, disabled=True, label_visibility='collapsed')
-    with right:
+    default_label = str(current.get('human_label','')) if str(current.get('human_label','')) in ['PASS','REJECT'] else 'REJECT'
+    existing_reasons = [x for x in str(current.get('human_reason','')).replace('|',',').replace(';',',').split(',') if x in REASONS]
+    conf_val = str(current.get('human_confidence','')) if str(current.get('human_confidence','')) in ['1','2','3'] else '2'
+
+    meta_col, media_col, sheet_col = st.columns([0.95, 1.0, 1.35])
+    with meta_col:
+        st.caption(f"{current.get('sample_id','')} · {current.get('sample_group','')}")
+        st.markdown(f"**{current.get('task_family','')}** / `{current.get('robotwin_task_name','')}`")
+        st.caption(
+            f"T={current.get('T','')} · complexity={current.get('action_complexity_score','')} · "
+            f"arm={current.get('dominant_arm','')}"
+        )
+        st.caption(
+            f"QC={current.get('current_qc_status','')} · "
+            f"{str(current.get('current_qc_reason',''))[:130]}"
+        )
+        labels_text = str(current.get('current_qc_labels',''))
+        if labels_text:
+            st.caption(f"labels: {labels_text[:160]}")
+        st.text_area('Prompt', str(current.get('prompt_short','')), height=58, disabled=True)
+        st.text_area('Risk', str(current.get('risk_summary','')), height=82, disabled=True)
+
+        st.markdown('**Annotation**')
+        label = st.radio('human_label', ['PASS','REJECT'], index=['PASS','REJECT'].index(default_label), horizontal=True, label_visibility='collapsed')
+        reason = st.multiselect('human_reason', REASONS, default=existing_reasons, label_visibility='collapsed')
+        confidence = st.select_slider(
+            'human_confidence',
+            options=['1','2','3'],
+            value=conf_val,
+            format_func=lambda x: {'1':'1 不确定','2':'2 基本确定','3':'3 很确定'}[x],
+            label_visibility='collapsed',
+        )
+        notes = st.text_area('notes', value=str(current.get('notes','')), height=54, placeholder='notes', label_visibility='collapsed')
+        annotator = st.text_input('annotator', value=str(current.get('annotator','')) or 'default', label_visibility='collapsed')
+
+    with media_col:
         video_path = Path(str(current.get('video_path','')))
-        if video_path.exists(): st.video(str(video_path))
+        if video_path.exists(): show_video_compact(st, video_path, width=430)
         else: st.error(f'video missing: {current.get("video_path","")}')
         fp = Path(str(current.get('first_frame_path','')))
-        if fp.exists(): st.image(str(fp), caption='first frame', use_container_width=True)
+        if fp.exists(): st.image(str(fp), caption='first frame', width=210)
 
-    tabs = st.tabs(['Overview','Motion Peak','Action Peak'])
-    for tab, col in zip(tabs, ['overview_sheet','motion_peak_sheet','action_peak_sheet']):
-        with tab:
-            p=Path(str(current.get(col,'')))
-            if p.exists(): st.image(str(p), use_container_width=True)
-            else: st.warning(f'missing {col}: {p}')
-
-    st.subheader('Annotation')
-    default_label = str(current.get('human_label','')) if str(current.get('human_label','')) in ['PASS','REJECT'] else 'REJECT'
-    label = st.radio('human_label', ['PASS','REJECT'], index=['PASS','REJECT'].index(default_label), horizontal=True)
-    existing_reasons = [x for x in str(current.get('human_reason','')).replace('|',',').replace(';',',').split(',') if x in REASONS]
-    reason = st.multiselect('human_reason', REASONS, default=existing_reasons)
-    conf_val = str(current.get('human_confidence','')) if str(current.get('human_confidence','')) in ['1','2','3'] else '2'
-    confidence = st.select_slider('human_confidence', options=['1','2','3'], value=conf_val, format_func=lambda x: {'1':'1 = 不确定','2':'2 = 基本确定','3':'3 = 很确定'}[x])
-    notes = st.text_area('notes', value=str(current.get('notes','')), height=100)
-    annotator = st.text_input('annotator', value=str(current.get('annotator','')) or 'default')
+    with sheet_col:
+        tabs = st.tabs(['Overview','Motion Peak','Action Peak'])
+        for tab, col in zip(tabs, ['overview_sheet','motion_peak_sheet','action_peak_sheet']):
+            with tab:
+                sheet_path=Path(str(current.get(col,'')))
+                if sheet_path.exists(): st.image(str(sheet_path), width=590)
+                else: st.warning(f'missing {col}: {sheet_path}')
 
     def save_current(skip=False):
         idx = st.session_state.idx
@@ -184,21 +224,22 @@ def main():
             df.at[idx,'annotator'] = annotator
         save_data(df, args.csv, args.out)
 
-    b1,b2,b3,b4,b5 = st.columns(5)
-    if b1.button('Save & Next', type='primary'):
-        save_current(); st.session_state.idx = first_unlabeled_index(df, indices, st.session_state.idx); st.rerun()
-    if b2.button('Save Only'):
-        save_current(); st.success('saved')
-    if b3.button('Previous'):
-        pos = indices.index(st.session_state.idx) if st.session_state.idx in indices else 0
-        st.session_state.idx = indices[max(0,pos-1)]; st.rerun()
-    if b4.button('Next'):
-        pos = indices.index(st.session_state.idx) if st.session_state.idx in indices else 0
-        st.session_state.idx = indices[min(len(indices)-1,pos+1)]; st.rerun()
-    if b5.button('Skip'):
-        save_current(skip=True)
-        pos = indices.index(st.session_state.idx) if st.session_state.idx in indices else 0
-        st.session_state.idx = indices[min(len(indices)-1,pos+1)]; st.rerun()
+    with meta_col:
+        b1,b2,b3,b4,b5 = st.columns(5)
+        if b1.button('Save & Next', type='primary', use_container_width=True):
+            save_current(); st.session_state.idx = first_unlabeled_index(df, indices, st.session_state.idx); st.rerun()
+        if b2.button('Save Only', use_container_width=True):
+            save_current(); st.success('saved')
+        if b3.button('Previous', use_container_width=True):
+            pos = indices.index(st.session_state.idx) if st.session_state.idx in indices else 0
+            st.session_state.idx = indices[max(0,pos-1)]; st.rerun()
+        if b4.button('Next', use_container_width=True):
+            pos = indices.index(st.session_state.idx) if st.session_state.idx in indices else 0
+            st.session_state.idx = indices[min(len(indices)-1,pos+1)]; st.rerun()
+        if b5.button('Skip', use_container_width=True):
+            save_current(skip=True)
+            pos = indices.index(st.session_state.idx) if st.session_state.idx in indices else 0
+            st.session_state.idx = indices[min(len(indices)-1,pos+1)]; st.rerun()
 
 if __name__ == '__main__':
     main()
