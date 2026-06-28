@@ -40,13 +40,16 @@ def load_template(robotwin_root: Path|None):
 
 
 def domain_randomization(name):
+    # RoboTwin treats random_head_camera_dis and random_table_height as numeric distances.
+    # Never write bool True here: in Python True == 1, which can move the camera/table by ~1m
+    # and produces empty/table-edge videos. Keep camera fixed for WorldArena v0.
     if name=='wa_clean_fixed':
-        return {'cluttered_table':False,'random_background':False,'clean_background_rate':1.0,'random_light':False,'crazy_random_light_rate':0.0,'random_table_height':False,'random_head_camera_dis':False}
+        return {'cluttered_table':False,'random_background':False,'clean_background_rate':1.0,'random_light':False,'crazy_random_light_rate':0.0,'random_table_height':0.0,'random_head_camera_dis':0.0}
     if name=='wa_mild_random':
-        return {'cluttered_table':True,'random_background':True,'clean_background_rate':0.7,'random_light':True,'crazy_random_light_rate':0.05,'random_table_height':True,'random_head_camera_dis':True}
+        return {'cluttered_table':True,'random_background':True,'clean_background_rate':0.7,'random_light':True,'crazy_random_light_rate':0.03,'random_table_height':0.02,'random_head_camera_dis':0.0}
     if name=='wa_hard_success':
-        return {'cluttered_table':True,'random_background':True,'clean_background_rate':0.35,'random_light':True,'crazy_random_light_rate':0.15,'random_table_height':True,'random_head_camera_dis':True}
-    return {'cluttered_table':False,'random_background':False,'clean_background_rate':1.0,'random_light':False,'crazy_random_light_rate':0.0,'random_table_height':False,'random_head_camera_dis':False}
+        return {'cluttered_table':True,'random_background':True,'clean_background_rate':0.35,'random_light':True,'crazy_random_light_rate':0.08,'random_table_height':0.03,'random_head_camera_dis':0.0}
+    return {'cluttered_table':False,'random_background':False,'clean_background_rate':1.0,'random_light':False,'crazy_random_light_rate':0.0,'random_table_height':0.0,'random_head_camera_dis':0.0}
 
 
 def cfg(name, embodiment, template):
