@@ -50,7 +50,7 @@ def load_template(robotwin_root: Path | None):
             "language_num": 100,
             "domain_randomization": {},
             "camera": {
-                "head_camera_type": "D435",
+                "head_camera_type": "Large_D435",
                 "wrist_camera_type": "D435",
                 "collect_head_camera": True,
                 "collect_wrist_camera": False,
@@ -122,7 +122,12 @@ def domain_randomization(name: str) -> dict:
     raise ValueError(f"unknown config name: {name}")
 
 
-def cfg(name: str, embodiment: str, template: dict) -> dict:
+def cfg(
+    name: str,
+    embodiment: str,
+    template: dict,
+    head_camera_type: str = "Large_D435",
+) -> dict:
     base = copy.deepcopy(template)
     base["episode_num"] = 5
     base["use_seed"] = False
@@ -136,7 +141,7 @@ def cfg(name: str, embodiment: str, template: dict) -> dict:
     base["camera"] = base.get("camera") or {}
     base["camera"].update(
         {
-            "head_camera_type": "D435",
+            "head_camera_type": head_camera_type,
             "collect_head_camera": True,
             "wrist_camera_type": "D435",
             "collect_wrist_camera": False,
@@ -196,6 +201,11 @@ def main():
     parser.add_argument("--write-probe-configs", action="store_true")
     parser.add_argument("--embodiment")
     parser.add_argument("--main-embodiment", default="aloha-agilex")
+    parser.add_argument(
+        "--head-camera-type",
+        default="Large_D435",
+        help="Use Large_D435 by default so v0 renders native 640x480 instead of upscaling D435 320x240.",
+    )
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -217,7 +227,7 @@ def main():
         for embodiment in embodiments:
             cfg_name = f"{name}__{safe(embodiment)}"
             path = out / "configs_to_apply" / f"{cfg_name}.yml"
-            write_yaml(path, cfg(name, embodiment, template))
+            write_yaml(path, cfg(name, embodiment, template, args.head_camera_type))
             written.append(str(path))
             if args.apply and robotwin_root:
                 shutil.copy2(path, robotwin_root / "task_config" / f"{cfg_name}.yml")
@@ -228,7 +238,9 @@ def main():
         ]:
             cfg_name = f"wa_probe_dual_arm__{safe(embodiment)}"
             path = out / "configs_to_apply" / f"{cfg_name}.yml"
-            write_yaml(path, cfg("wa_clean_fixed", embodiment, template))
+            write_yaml(
+                path, cfg("wa_clean_fixed", embodiment, template, args.head_camera_type)
+            )
             written.append(str(path))
             if args.apply and robotwin_root:
                 shutil.copy2(path, robotwin_root / "task_config" / f"{cfg_name}.yml")

@@ -14,6 +14,7 @@ from create_robotwin_configs import (
 )  # noqa: E402
 from utils import (  # noqa: E402
     PROBE_TASKS,
+    TASK_CANDIDATES,
     available_robotwin_tasks,
     detect_robotwin_root,
     ensure_dirs,
@@ -45,6 +46,9 @@ TASK_FAMILY = {
     "click_bell": "button_press_click",
     "open_microwave": "articulated_open_close",
 }
+for _family, _tasks in TASK_CANDIDATES.items():
+    for _task in _tasks:
+        TASK_FAMILY.setdefault(_task, _family)
 
 
 def safe(value: str) -> str:
@@ -62,6 +66,16 @@ def main():
     parser.add_argument("--enable-mild-random", action="store_true")
     parser.add_argument("--enable-hard-random", action="store_true")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--tasks",
+        default=",".join(PROBE_TASKS),
+        help="Comma-separated RoboTwin tasks to probe. Default is the standard small probe set.",
+    )
+    parser.add_argument(
+        "--head-camera-type",
+        default="Large_D435",
+        help="Use Large_D435 by default to render native 640x480 clips for QC.",
+    )
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -73,18 +87,19 @@ def main():
     for name in configs:
         cfg_name = f"{name}__aloha_agilex"
         path = out / "configs_to_apply" / f"{cfg_name}.yml"
-        write_yaml(path, cfg(name, "aloha-agilex", template))
+        write_yaml(path, cfg(name, "aloha-agilex", template, args.head_camera_type))
         written_configs.append(str(path))
         if args.apply and robotwin_root:
             shutil.copy2(path, robotwin_root / "task_config" / f"{cfg_name}.yml")
 
     available = set(available_robotwin_tasks(robotwin_root))
     gpus = [x.strip() for x in args.gpus.split(",") if x.strip()] or ["0"]
+    probe_tasks = [x.strip() for x in args.tasks.split(",") if x.strip()]
     rows = []
     missing = []
     job_id = 0
     for config_name in configs:
-        for task in PROBE_TASKS:
+        for task in probe_tasks:
             if available and task not in available:
                 missing.append({"task": task, "reason": "not_found_in_robotwin"})
                 continue
@@ -120,6 +135,8 @@ def main():
         "reason": "jobs_generated_only_not_collected",
         "configs": configs,
         "episodes_per_task": args.episodes_per_task,
+        "tasks": probe_tasks,
+        "head_camera_type": args.head_camera_type,
         "jobs_csv": str(jobs_path),
         "written_configs": written_configs,
         "next_step": "Run run_robotwin_jobs.py with --jobs-csv probe_collection_jobs.csv, convert, inspect contact sheets, then set probe_pass true only after manual approval.",
