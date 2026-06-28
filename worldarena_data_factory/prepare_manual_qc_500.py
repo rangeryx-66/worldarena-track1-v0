@@ -270,6 +270,7 @@ def main():
     ap.add_argument('--resume', action='store_true')
     ap.add_argument('--max-samples', type=int)
     ap.add_argument('--force-regenerate', action='store_true')
+    ap.add_argument('--progress-every', type=int, default=10, help='Print progress every N prepared samples.')
     args=ap.parse_args()
     out=args.out; out.mkdir(parents=True, exist_ok=True)
     csv_path=out/'manual_qc_500.csv'
@@ -297,6 +298,8 @@ def main():
         fill=df.drop(index=selected.index, errors='ignore').sample(min(n_total-len(selected), len(df)-len(selected)), random_state=args.seed).copy(); fill['sample_group']='random_eval'; selected=pd.concat([selected, fill], ignore_index=True)
     selected=selected.head(n_total).reset_index(drop=True)
     errors=[]; rows=[]
+    total=len(selected)
+    print(f'preparing {total} samples; generating overview/motion/action sheets...', flush=True)
     for i,row in selected.iterrows():
         eid=safe_str(row.get('episode_id'))
         try:
@@ -320,6 +323,9 @@ def main():
             })
         except Exception as e:
             errors.append({'episode_id':eid,'stage':'prepare','error':f'{type(e).__name__}: {e}'})
+        done=i+1
+        if done == 1 or done == total or (args.progress_every > 0 and done % args.progress_every == 0):
+            print(f'prepared {done}/{total} samples; rows={len(rows)} errors={len(errors)}', flush=True)
     pd.DataFrame(rows, columns=FIELDS).to_csv(csv_path, index=False)
     write_errors(out/'errors.csv', errors)
     print(f'wrote {len(rows)} rows to {csv_path}; errors={len(errors)}')
