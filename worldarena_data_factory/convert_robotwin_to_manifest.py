@@ -51,15 +51,24 @@ def video_meta(path: Path) -> dict:
 def find_raw_video(hdf5_path: Path) -> Path | None:
     stem = hdf5_path.stem
     root = hdf5_path.parent.parent
-    candidates = [
+    exact_candidates = [
         root / "video" / f"{stem}.mp4",
         root / "video" / "videos" / f"{stem}.mp4",
     ]
+    for path in exact_candidates:
+        if not path.exists():
+            continue
+        meta = video_meta(path)
+        if meta.get("readable") and meta.get("frame_count", 0) >= 12:
+            return path
+
+    candidates = list(exact_candidates)
     candidates.extend(root.glob(f"**/{stem}.mp4"))
     candidates.extend(
         p
         for p in root.glob("**/*.mp4")
-        if any(token in str(p).lower() for token in ["head", "camera", "video"])
+        if p.stem == stem
+        and any(token in str(p).lower() for token in ["head", "camera", "video"])
     )
     unique = []
     seen = set()
@@ -147,6 +156,194 @@ def visual_sanity(frames: list[np.ndarray]) -> tuple[str, str, dict]:
     if no_foreground:
         return "FAIL", "almost_no_foreground", metrics
     return "PASS", "ok", metrics
+
+
+def _as_frame_array(arr: np.ndarray, t_expected: int) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        arr = arr[None]
+    if arr.shape[0] == 1 and t_expected > 1:
+        arr = np.repeat(arr, t_expected, axis=0)
+    return arr
+
+
+def _extrinsic_cv_to_c2w(extrinsic_cv: np.ndarray) -> np.ndarray:
+    extrinsic_cv = _as_frame_array(extrinsic_cv, 1).astype(np.float32)
+    mats = []
+    for ext in extrinsic_cv:
+        mat = np.eye(4, dtype=np.float32)
+        if ext.shape == (3, 4):
+            mat[:3, :4] = ext
+        elif ext.shape == (4, 4):
+            mat = ext.astype(np.float32)
+        else:
+            raise ValueError(f"unexpected extrinsic_cv shape: {ext.shape}")
+        mats.append(np.linalg.inv(mat))
+    return np.stack(mats, axis=0)
+
+
+def _extrinsic_records(c2w: np.ndarray) -> list[dict]:
+    records = []
+    for mat in c2w:
+        records.append(
+            {
+                "extrinsic": {
+                    "rotation_matrix": mat[:3, :3].astype(float).tolist(),
+                    "translation_vector": mat[:3, 3].astype(float).tolist(),
+                }
+            }
+        )
+    return records
+
+
+def _matrix_preview(arr: np.ndarray | None, idx: int = 0):
+    if arr is None:
+        return None
+    arr = np.asarray(arr)
+    if arr.ndim >= 3:
+        arr = arr[min(idx, arr.shape[0] - 1)]
+    return arr.astype(float).tolist()
+
+
+def read_hdf5_camera_payload(f, t_expected: int) -> dict:
+    for camera_name in ["head_camera", "front_camera"]:
+        base = f"/observation/{camera_name}"
+        intrinsic_key = f"{base}/intrinsic_cv"
+        extrinsic_key = f"{base}/extrinsic_cv"
+        cam2world_key = f"{base}/cam2world_gl"
+        if intrinsic_key not in f:
+            continue
+
+        intrinsic_cv = _as_frame_array(np.asarray(f[intrinsic_key]), t_expected)
+        extrinsic_cv = (
+            _as_frame_array(np.asarray(f[extrinsic_key]), t_expected)
+            if extrinsic_key in f
+            else None
+        )
+        cam2world_gl = (
+            _as_frame_array(np.asarray(f[cam2world_key]), t_expected)
+            if cam2world_key in f
+            else None
+        )
+
+        if extrinsic_cv is not None:
+            c2w = _extrinsic_cv_to_c2w(extrinsic_cv)
+            return {
+                "source": "hdf5_verified",
+                "camera_name": camera_name,
+                "convention": "opencv_intrinsic_cv_plus_extrinsic_cv_w2c_inverted_to_c2w",
+                "intrinsic_key": intrinsic_key.lstrip("/"),
+                "extrinsic_key": extrinsic_key.lstrip("/"),
+                "cam2world_key": cam2world_key.lstrip("/")
+                if cam2world_gl is not None
+                else "",
+                "intrinsic_cv": intrinsic_cv,
+                "extrinsic_cv": extrinsic_cv,
+                "cam2world_gl": cam2world_gl,
+                "c2w_for_abot": c2w,
+            }
+        if cam2world_gl is not None:
+            return {
+                "source": "hdf5_verified",
+                "camera_name": camera_name,
+                "convention": "opencv_intrinsic_cv_plus_cam2world_gl",
+                "intrinsic_key": intrinsic_key.lstrip("/"),
+                "extrinsic_key": "",
+                "cam2world_key": cam2world_key.lstrip("/"),
+                "intrinsic_cv": intrinsic_cv,
+                "extrinsic_cv": None,
+                "cam2world_gl": cam2world_gl,
+                "c2w_for_abot": cam2world_gl.astype(np.float32),
+            }
+    return {"source": "fallback"}
+
+
+def write_camera_files(epdir: Path, payload: dict, t_expected: int) -> dict:
+    intrinsic_path = epdir / "camera_intrinsic.json"
+    extrinsic_path = epdir / "camera_extrinsic.json"
+    info_path = epdir / "camera_info.json"
+
+    if payload.get("source") != "hdf5_verified":
+        write_json(intrinsic_path, {"fallback": True})
+        write_json(extrinsic_path, {"fallback": True})
+        write_json(
+            info_path,
+            {
+                "camera_source": "fallback",
+                "camera_name": "",
+                "camera_convention": "default_60deg_identity",
+                "reason": "no_hdf5_camera_fields_found",
+            },
+        )
+        return {
+            "intrinsic_path": str(intrinsic_path),
+            "extrinsic_path": str(extrinsic_path),
+            "camera_info_path": str(info_path),
+            "camera_source": "fallback",
+            "camera_name": "",
+            "camera_convention": "default_60deg_identity",
+            "quality_flag": "camera_fallback",
+        }
+
+    intrinsic_cv = _as_frame_array(payload["intrinsic_cv"], t_expected).astype(np.float32)
+    c2w = _as_frame_array(payload["c2w_for_abot"], t_expected).astype(np.float32)
+    if c2w.shape[0] < t_expected:
+        c2w = np.concatenate(
+            [c2w, np.repeat(c2w[-1:], t_expected - c2w.shape[0], axis=0)], axis=0
+        )
+    elif c2w.shape[0] > t_expected:
+        c2w = c2w[:t_expected]
+
+    K = intrinsic_cv[0]
+    write_json(
+        intrinsic_path,
+        {
+            "intrinsic": {
+                "fx": float(K[0, 0]),
+                "fy": float(K[1, 1]),
+                "ppx": float(K[0, 2]),
+                "ppy": float(K[1, 2]),
+            },
+            "matrix": K.astype(float).tolist(),
+            "source": "hdf5",
+            "camera_name": payload["camera_name"],
+            "hdf5_key": payload["intrinsic_key"],
+            "per_frame_shape": list(intrinsic_cv.shape),
+        },
+    )
+    write_json(extrinsic_path, _extrinsic_records(c2w))
+    write_json(
+        info_path,
+        {
+            "camera_source": "hdf5_verified",
+            "camera_name": payload["camera_name"],
+            "camera_convention": payload["convention"],
+            "intrinsic_key": payload["intrinsic_key"],
+            "extrinsic_key": payload.get("extrinsic_key", ""),
+            "cam2world_key": payload.get("cam2world_key", ""),
+            "intrinsic_cv_shape": list(intrinsic_cv.shape),
+            "extrinsic_cv_shape": list(np.asarray(payload["extrinsic_cv"]).shape)
+            if payload.get("extrinsic_cv") is not None
+            else None,
+            "cam2world_gl_shape": list(np.asarray(payload["cam2world_gl"]).shape)
+            if payload.get("cam2world_gl") is not None
+            else None,
+            "abot_extrinsic_json_is": "camera_to_world; generated by inverting RoboTwin extrinsic_cv when available",
+            "intrinsic_cv_first": _matrix_preview(intrinsic_cv),
+            "extrinsic_cv_first": _matrix_preview(payload.get("extrinsic_cv")),
+            "cam2world_gl_first": _matrix_preview(payload.get("cam2world_gl")),
+            "c2w_for_abot_first": _matrix_preview(c2w),
+        },
+    )
+    return {
+        "intrinsic_path": str(intrinsic_path),
+        "extrinsic_path": str(extrinsic_path),
+        "camera_info_path": str(info_path),
+        "camera_source": "hdf5_verified",
+        "camera_name": payload["camera_name"],
+        "camera_convention": payload["convention"],
+        "quality_flag": "camera_hdf5_verified",
+    }
 
 
 def make_video_and_frame(raw_video: Path, epdir: Path) -> tuple[str, str, list[str]]:
@@ -298,6 +495,7 @@ def main():
                         raise ValueError(
                             "rejected_action_schema: endpose length mismatch"
                         )
+                    camera_payload = read_hdf5_camera_payload(f, T)
 
                 raw_video = find_raw_video(hdf5_path)
                 if raw_video is None:
@@ -341,8 +539,7 @@ def main():
                     epdir / "action_joint14_ee16.npy",
                     np.concatenate([action, ee], axis=1),
                 )
-                write_json(epdir / "camera_intrinsic.json", {"fallback": True})
-                write_json(epdir / "camera_extrinsic.json", {"fallback": True})
+                camera_meta = write_camera_files(epdir, camera_payload, T)
                 write_json(epdir / "meta.json", job)
                 write_json(
                     epdir / "visual_sanity.json",
@@ -354,7 +551,7 @@ def main():
                 )
 
                 qflags = [
-                    "camera_fallback",
+                    camera_meta["quality_flag"],
                     "dual_arm_joint14_valid",
                     "aloha_agilex_domain",
                 ] + media_flags
@@ -389,8 +586,12 @@ def main():
                         "action_joint14_ee16_raw_path": str(
                             epdir / "action_joint14_ee16.npy"
                         ),
-                        "intrinsic_path": str(epdir / "camera_intrinsic.json"),
-                        "extrinsic_path": str(epdir / "camera_extrinsic.json"),
+                        "intrinsic_path": camera_meta["intrinsic_path"],
+                        "extrinsic_path": camera_meta["extrinsic_path"],
+                        "camera_info_path": camera_meta["camera_info_path"],
+                        "camera_source": camera_meta["camera_source"],
+                        "camera_name": camera_meta["camera_name"],
+                        "camera_convention": camera_meta["camera_convention"],
                         "T": T,
                         "fps": 24,
                         "dominant_arm": "",

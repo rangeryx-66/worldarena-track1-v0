@@ -1,0 +1,12 @@
+{
+  "name": "robotwin_hdf5_z0",
+  "camera_name": "head_camera",
+  "intrinsic_mode": "raw",
+  "extrinsic_mode": "inverse_extrinsic_cv",
+  "ee_local_z_offset": 0.0,
+  "camera_source": "hdf5_verified_for_self_collected",
+  "worldarena_camera_policy": "config_recovered_or_calibrated_fallback",
+  "notes": "Calibrated on RoboTwin Aloha-AgileX head_camera exported video. RoboTwin ee16 quaternion is treated as wxyz and converted to ABot xyzw before action-map generation. Do not use ABot hardcoded z=0.23 unless running ablation.",
+  "quat_order": "wxyz",
+  "abot_expected_quat_order": "xyzw"
+}

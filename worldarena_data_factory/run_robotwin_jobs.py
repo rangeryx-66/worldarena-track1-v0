@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
 import subprocess
 import sys
 import time
@@ -97,6 +98,31 @@ def cmd_for(root: Path, job: dict) -> list[str]:
     ]
 
 
+def robotwin_env(out: Path, job: dict) -> dict[str, str]:
+    env = os.environ.copy()
+    icd_path = out / "runtime" / "nvidia_egl_icd.json"
+    icd_path.parent.mkdir(parents=True, exist_ok=True)
+    icd_path.write_text(
+        "{\n"
+        '    "file_format_version" : "1.0.1",\n'
+        '    "ICD": {\n'
+        '        "library_path": "libEGL_nvidia.so.0",\n'
+        '        "api_version" : "1.4.312"\n'
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    runtime_dir = out / "runtime" / f"xdg_gpu_{job.get('gpu_id', '0')}"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    env["VK_ICD_FILENAMES"] = str(icd_path)
+    env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+    env["VK_LOADER_DRIVERS_SELECT"] = "*nvidia*"
+    env["PYTHONFAULTHANDLER"] = "1"
+    env["WORLD_ARENA_JOB_ID"] = str(job.get("job_id", ""))
+    return env
+
+
 def ensure_job_config(root: Path, out: Path, job: dict) -> tuple[Path, bool]:
     import yaml
 
@@ -155,9 +181,16 @@ def run_one(root: Path, out: Path, job: dict) -> dict:
                 f.write("JOB: " + str(job) + "\n")
                 f.write("CONFIG: " + config_path + "\n")
                 f.write("CMD: " + " ".join(cmd_for(root, job)) + "\n")
+                env = robotwin_env(out, job)
+                f.write("VK_ICD_FILENAMES: " + env.get("VK_ICD_FILENAMES", "") + "\n")
+                f.write("XDG_RUNTIME_DIR: " + env.get("XDG_RUNTIME_DIR", "") + "\n")
                 f.flush()
                 rc = subprocess.run(
-                    cmd_for(root, job), cwd=root, stdout=f, stderr=subprocess.STDOUT
+                    cmd_for(root, job),
+                    cwd=root,
+                    env=env,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
                 ).returncode
             if rc != 0:
                 break

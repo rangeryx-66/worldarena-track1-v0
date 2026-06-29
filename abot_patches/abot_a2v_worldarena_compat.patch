@@ -1,130 +1,63 @@
-diff --git a/inference/diffsynth/models/wan_video_vace.py b/inference/diffsynth/models/wan_video_vace.py
-index 5a8f61a..961e42e 100755
---- a/inference/diffsynth/models/wan_video_vace.py
-+++ b/inference/diffsynth/models/wan_video_vace.py
-@@ -57,10 +57,22 @@ class VaceWanModel(torch.nn.Module):
-     ):
-         c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
-         c = [u.flatten(2).transpose(1, 2) for u in c]
--        c = torch.cat([
--            torch.cat([u, u.new_zeros(1, x.shape[1] - u.size(1), u.size(2))],
--                      dim=1) for u in c
--        ])
-+        aligned = []
-+        for u in c:
-+            if u.size(1) > x.shape[1]:
-+                import os
-+                if os.environ.get("ABOT_ALLOW_VACE_TOKEN_TRUNCATE", "0") != "1":
-+                    raise RuntimeError(
-+                        "VACE context has more tokens than DiT latents "
-+                        f"({u.size(1)} > {x.shape[1]}). Refuse to truncate by default; "
-+                        "fix the A2V condition/video geometry or set "
-+                        "ABOT_ALLOW_VACE_TOKEN_TRUNCATE=1 only for smoke tests."
-+                    )
-+                u = u[:, :x.shape[1], :]
-+            elif u.size(1) < x.shape[1]:
-+                u = torch.cat([u, u.new_zeros(1, x.shape[1] - u.size(1), u.size(2))], dim=1)
-+            aligned.append(u)
-+        c = torch.cat(aligned)
-         
-         def create_custom_forward(module):
-             def custom_forward(*inputs):
-diff --git a/inference/diffsynth/pipelines/wan_video_new.py b/inference/diffsynth/pipelines/wan_video_new.py
-index 12595f9..bd64ec4 100755
---- a/inference/diffsynth/pipelines/wan_video_new.py
-+++ b/inference/diffsynth/pipelines/wan_video_new.py
-@@ -447,14 +447,17 @@ class WanVideoPipeline(BasePipeline):
-         else:
-             step = max(1, num_layers // 8)
-             vace_layers = tuple(range(0, num_layers, step))
-+        first_block = dit.blocks[0] if hasattr(dit, "blocks") and len(dit.blocks) > 0 else None
-+        num_heads = getattr(dit, "num_heads", getattr(first_block, "num_heads", 40))
-+        ffn_dim = getattr(dit, "ffn_dim", getattr(first_block, "ffn_dim", 13824))
-         vace = VaceWanModel(
-             vace_layers=vace_layers,
-             vace_in_dim=vace_in_dim,
-             patch_size=tuple(dit.patch_size) if hasattr(dit, "patch_size") else (1, 2, 2),
-             has_image_input=getattr(dit, "has_image_input", False),
-             dim=dit.dim,
--            num_heads=dit.num_heads,
--            ffn_dim=dit.ffn_dim,
-+            num_heads=num_heads,
-+            ffn_dim=ffn_dim,
-             eps=getattr(dit, "eps", 1e-6),
-         )
-         vace.init_from_dit(dit, zero_init_extra=zero_init_extra)
-diff --git a/inference/diffsynth/pipelines/wan_video_new_vace.py b/inference/diffsynth/pipelines/wan_video_new_vace.py
-index 3138e4e..fc49ecf 100755
---- a/inference/diffsynth/pipelines/wan_video_new_vace.py
-+++ b/inference/diffsynth/pipelines/wan_video_new_vace.py
-@@ -448,14 +448,17 @@ class WanVideoPipeline(BasePipeline):
-         else:
-             step = max(1, num_layers // 8)
-             vace_layers = tuple(range(0, num_layers, step))
-+        first_block = dit.blocks[0] if hasattr(dit, "blocks") and len(dit.blocks) > 0 else None
-+        num_heads = getattr(dit, "num_heads", getattr(first_block, "num_heads", 40))
-+        ffn_dim = getattr(dit, "ffn_dim", getattr(first_block, "ffn_dim", 13824))
-         vace = VaceWanModel(
-             vace_layers=vace_layers,
-             vace_in_dim=vace_in_dim,
-             patch_size=tuple(dit.patch_size) if hasattr(dit, "patch_size") else (1, 2, 2),
-             has_image_input=getattr(dit, "has_image_input", False),
-             dim=dit.dim,
--            num_heads=dit.num_heads,
--            ffn_dim=dit.ffn_dim,
-+            num_heads=num_heads,
-+            ffn_dim=ffn_dim,
-             eps=getattr(dit, "eps", 1e-6),
-         )
-         vace.init_from_dit(dit, zero_init_extra=zero_init_extra)
-diff --git a/inference/diffsynth/trainers/unified_dataset.py b/inference/diffsynth/trainers/unified_dataset.py
-index 00c7eb4..2ee746f 100755
---- a/inference/diffsynth/trainers/unified_dataset.py
-+++ b/inference/diffsynth/trainers/unified_dataset.py
-@@ -108,6 +108,15 @@ class ImageCropAndResize(DataProcessingOperator):
- 
- 
- 
-+class ImageStretchResize(ImageCropAndResize):
-+    def crop_and_resize(self, image, target_height, target_width):
-+        return torchvision.transforms.functional.resize(
-+            image,
-+            (target_height, target_width),
-+            interpolation=torchvision.transforms.InterpolationMode.BILINEAR,
-+        )
-+
-+
- class ToList(DataProcessingOperator):
-     def __call__(self, data):
-         return [data]
-@@ -356,17 +365,19 @@ class UnifiedDataset(torch.utils.data.Dataset):
-         height_division_factor=16, width_division_factor=16,
-         num_frames=81, time_division_factor=4, time_division_remainder=1,
-         uniform_sampling=True,
-+        resize_mode="crop",
-     ):
-+        frame_processor_cls = ImageStretchResize if resize_mode == "stretch" else ImageCropAndResize
-         return RouteByType(operator_map=[
-             (str, ToAbsolutePath(base_path) >> RouteByExtensionName(operator_map=[
--                (("jpg", "jpeg", "png", "webp"), LoadImage() >> ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor) >> ToList()),
-+                (("jpg", "jpeg", "png", "webp"), LoadImage() >> frame_processor_cls(height, width, max_pixels, height_division_factor, width_division_factor) >> ToList()),
-                 (("gif",), LoadGIF(
-                     num_frames, time_division_factor, time_division_remainder,
--                    frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
-+                    frame_processor=frame_processor_cls(height, width, max_pixels, height_division_factor, width_division_factor),
-                 )),
-                 (("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm"), LoadVideo(
-                     num_frames, time_division_factor, time_division_remainder,
--                    frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
-+                    frame_processor=frame_processor_cls(height, width, max_pixels, height_division_factor, width_division_factor),
-                     uniform_sampling=uniform_sampling,
-                 )),
-             ])),
 diff --git a/inference/diffsynth/utils/action_utils.py b/inference/diffsynth/utils/action_utils.py
-index ef590a4..50da4b1 100755
+index ef590a4..fc31b68 100755
 --- a/inference/diffsynth/utils/action_utils.py
 +++ b/inference/diffsynth/utils/action_utils.py
-@@ -793,4 +793,43 @@ def load_camera_params_from_npy(
+@@ -102,7 +102,8 @@ def get_traj_maps(
+     c2w: torch.Tensor, 
+     intrinsic: torch.Tensor, 
+     sample_size: Tuple[int, int], 
+-    radius_gen_func=None
++    radius_gen_func=None,
++    ee_local_z_offset: float = 0.23,
+ ) -> torch.Tensor:
+     """
+     生成轨迹图（Pose2Image Conditioning）
+@@ -121,6 +122,7 @@ def get_traj_maps(
+         intrinsic: 相机内参矩阵, shape (v, 3, 3)
+         sample_size: 输出图像尺寸 (h, w)
+         radius_gen_func: 可选的半径生成函数
++        ee_local_z_offset: EE local z offset used before projection. Official default is 0.23.
+     
+     Returns:
+         轨迹图, shape (c, v, t, h, w)，其中 c=3 (RGB)
+@@ -154,7 +156,7 @@ def get_traj_maps(
+     correct_matrix = torch.tensor([
+         [1, 0, 0, 0],
+         [0, 1, 0, 0],
+-        [0, 0, 1, 0.23],
++        [0, 0, 1, float(ee_local_z_offset)],
+         [0, 0, 0, 1]
+     ], dtype=torch.float32, device=device).view(1, 1, 4, 4)
+     ee2cam_l = torch.matmul(ee2cam_l, correct_matrix)
+@@ -516,7 +518,8 @@ def generate_action_condition(
+     intrinsics: torch.Tensor,
+     sample_size: Tuple[int, int],
+     radius_gen_func=None,
+-    device: str = "cpu"
++    device: str = "cpu",
++    ee_local_z_offset: float = 0.23,
+ ) -> torch.Tensor:
+     """
+     生成 action 条件张量（轨迹图 + 射线图）
+@@ -530,6 +533,7 @@ def generate_action_condition(
+         sample_size: 输出图像尺寸 (h, w)
+         radius_gen_func: 可选的半径生成函数
+         device: 设备
++        ee_local_z_offset: EE local z offset used before projection. Official default is 0.23.
+     
+     Returns:
+         action 条件张量, shape (9, v, t, h, w)
+@@ -557,7 +561,8 @@ def generate_action_condition(
+         c2w, 
+         intrinsics, 
+         sample_size, 
+-        radius_gen_func=radius_gen_func or simple_radius_gen_func
++        radius_gen_func=radius_gen_func or simple_radius_gen_func,
++        ee_local_z_offset=ee_local_z_offset,
+     )
+     
+     # 归一化到 [-1, 1]
+@@ -793,4 +798,52 @@ def load_camera_params_from_npy(
          intrinsic[0, 2] = intrinsic[0, 2] * scale - crop_left  # cx (ppx)
          intrinsic[1, 2] = intrinsic[1, 2] * scale - crop_top   # cy (ppy)
      
@@ -140,6 +73,7 @@ index ef590a4..50da4b1 100755
 +    original_size,
 +    target_size,
 +    radius_gen_func=None,
++    ee_local_z_offset: float = 0.23,
 +):
 +    """Generate VACE trajectory maps after scaling camera intrinsics for stretch resize.
 +
@@ -156,7 +90,15 @@ index ef590a4..50da4b1 100755
 +    intr = intrinsic.clone()
 +    intr[..., 0, :] = intr[..., 0, :] * (float(tgt_w) / max(float(orig_w), 1.0))
 +    intr[..., 1, :] = intr[..., 1, :] * (float(tgt_h) / max(float(orig_h), 1.0))
-+    return get_traj_maps(pose, w2c, c2w, intr, (tgt_h, tgt_w), radius_gen_func=radius_gen_func)
++    return get_traj_maps(
++        pose,
++        w2c,
++        c2w,
++        intr,
++        (tgt_h, tgt_w),
++        radius_gen_func=radius_gen_func,
++        ee_local_z_offset=ee_local_z_offset,
++    )
 +
 +# Compatibility helper for stretch resizing camera intrinsics.
 +def adjust_intrinsic_for_resize_stretch(intrinsic, original_size, target_size):
@@ -170,11 +112,79 @@ index ef590a4..50da4b1 100755
 +    intr[..., 0, :] = intr[..., 0, :] * (float(tgt_w) / max(float(orig_w), 1.0))
 +    intr[..., 1, :] = intr[..., 1, :] * (float(tgt_h) / max(float(orig_h), 1.0))
 +    return intr
+diff --git a/inference/inference_a2v.py b/inference/inference_a2v.py
+index 77e5bc2..5bc7aad 100644
+--- a/inference/inference_a2v.py
++++ b/inference/inference_a2v.py
+@@ -146,6 +146,19 @@ def round_up_to_4n_plus_1(num_frames):
+ # Action data loading (aligned with training module)
+ # =====================================================================
+ 
++def _convert_action_quat_order(actions, quat_order):
++    quat_order = str(quat_order or "xyzw").lower()
++    if quat_order == "xyzw" or actions is None or actions.shape[-1] < 16:
++        return actions
++    if quat_order != "wxyz":
++        raise ValueError(f"unsupported quat_order: {quat_order}")
++    out = actions.clone()
++    for start in [3, 11]:
++        q = out[:, start:start + 4].clone()
++        out[:, start:start + 4] = q[:, [1, 2, 3, 0]]
++    return out
++
++
+ def _load_action_data(sample):
+     """Load action data from file (.npy or .h5).
+ 
+@@ -279,6 +292,9 @@ def _generate_action_condition(sample, target_size):
+                 [actions, actions[-1:].repeat(num_frames - action_num_frames, 1)], dim=0
+             )
+ 
++    quat_order = sample.get("quat_order", sample.get("action_map_quat_order", "xyzw"))
++    actions = _convert_action_quat_order(actions, quat_order)
++
+     original_size = _get_original_video_size(sample)
+     intrinsic_orig, extrinsics = _load_camera_params_raw(sample, num_frames, frame_indices=frame_indices)
+ 
+@@ -298,9 +314,13 @@ def _generate_action_condition(sample, target_size):
+     w2c = torch.linalg.inv(extrinsics_v)
+     c2w = extrinsics_v
+ 
++    ee_local_z_offset = float(
++        sample.get("ee_local_z_offset", sample.get("action_map_ee_local_z_offset", 0.23))
++    )
+     trajs_orig = get_traj_maps(
+         actions, w2c, c2w, intrinsic_adj_v, target_size,
+         radius_gen_func=simple_radius_gen_func,
++        ee_local_z_offset=ee_local_z_offset,
+     )
+     trajs_orig = (trajs_orig * 2 - 1).squeeze(1)  # (3, T, H, W) in [-1, 1]
+     return trajs_orig
 diff --git a/training/train_a2v.py b/training/train_a2v.py
-index 2e65863..d79baf9 100644
+index 2e65863..94b152c 100644
 --- a/training/train_a2v.py
 +++ b/training/train_a2v.py
-@@ -213,12 +213,21 @@ class WanActionVaceTrainingModule(DiffusionTrainingModule):
+@@ -80,6 +80,19 @@ from diffsynth.utils.action_utils import (
+ os.environ["TOKENIZERS_PARALLELISM"] = "false"
+ 
+ 
++def _convert_action_quat_order(actions, quat_order):
++    quat_order = str(quat_order or "xyzw").lower()
++    if quat_order == "xyzw" or actions is None or actions.shape[-1] < 16:
++        return actions
++    if quat_order != "wxyz":
++        raise ValueError(f"unsupported quat_order: {quat_order}")
++    out = actions.clone()
++    for start in [3, 11]:
++        q = out[:, start:start + 4].clone()
++        out[:, start:start + 4] = q[:, [1, 2, 3, 0]]
++    return out
++
++
+ class WanActionVaceTrainingModule(DiffusionTrainingModule):
+     """Training module for A2V VACE action-conditioned video generation.
+ 
+@@ -213,12 +226,21 @@ class WanActionVaceTrainingModule(DiffusionTrainingModule):
          if (self.action_condition_enabled and self.init_vace_from_dit
                  and self.pipe.dit is not None and self.pipe.vace is None):
              vace_in_dim = self.init_vace_from_dit_vace_in_dim
@@ -202,3 +212,28 @@ index 2e65863..d79baf9 100644
              self.pipe.vace = self.pipe.vace.to(
                  dtype=torch.bfloat16,
                  device=next(self.pipe.dit.parameters()).device,
+@@ -493,6 +515,9 @@ class WanActionVaceTrainingModule(DiffusionTrainingModule):
+                     [actions, actions[-1:].repeat(num_frames - action_num_frames, 1)], dim=0
+                 )
+ 
++        quat_order = data.get("quat_order", data.get("action_map_quat_order", "xyzw"))
++        actions = _convert_action_quat_order(actions, quat_order)
++
+         original_size = self._get_original_video_size(data)
+         intrinsic_orig, extrinsics = self._load_camera_params_raw(
+             data, num_frames, frame_indices=frame_indices
+@@ -502,10 +527,14 @@ class WanActionVaceTrainingModule(DiffusionTrainingModule):
+         w2c = torch.linalg.inv(extrinsics_v)
+         c2w = extrinsics_v
+ 
++        ee_local_z_offset = float(
++            data.get("ee_local_z_offset", data.get("action_map_ee_local_z_offset", 0.23))
++        )
+         trajs_resized = get_vace_traj_maps_with_scaled_intrinsic(
+             actions, w2c, c2w, intrinsic_orig_v,
+             original_size, target_size,
+             radius_gen_func=simple_radius_gen_func,
++            ee_local_z_offset=ee_local_z_offset,
+         ).squeeze(1)
+ 
+         return trajs_resized

@@ -76,9 +76,9 @@ def main():
         default="Large_D435",
         help="Use Large_D435 by default to render native 640x480 clips for QC.",
     )
-    parser.add_argument("--rt-spp", type=int, default=256)
+    parser.add_argument("--rt-spp", type=int, default=512)
     parser.add_argument("--rt-path-depth", type=int, default=8)
-    parser.add_argument("--rt-denoiser", default="optix")
+    parser.add_argument("--rt-denoiser", default="")
     args = parser.parse_args()
 
     out = Path(args.out)
